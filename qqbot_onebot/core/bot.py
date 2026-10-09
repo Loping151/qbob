@@ -1185,41 +1185,46 @@ class BotInstance:
     async def _refresh_quoted_media(self, mid: int, element: dict) -> None:
         """用引用 payload 里新签的 URL 替换原消息的过期链接.
 
-        同一张图文件名不变而 rkey 每次重签, 按文件名对上就回填.
+        同一张图文件名不变而 rkey 每次重签, 按文件名对上就回填. 自己发的消息没有平台
+        文件名, 按类型逐个对位; 视频 rkey 绑文件(见 cdnkeys), 这是取回原视频的唯一地址.
         """
-        fresh_urls: dict[str, str] = {}
-        for att in element.get("attachments") or []:
-            if not isinstance(att, dict):
-                continue
-            filename, url = str(att.get("filename") or ""), str(att.get("url") or "")
-            if not filename or not url:
-                continue
-            if url.startswith("//"):
-                url = "https:" + url
-            fresh_urls[filename] = url
-        if not fresh_urls:
+        quoted = [s for s in await self._attachments_to_segments(element)
+                  if s["data"]["url"]]
+        if not quoted:
             return
         row = await self.db.fetchone(
-            "SELECT content FROM messages WHERE mid=?", (mid,))
+            "SELECT content, direction FROM messages WHERE mid=?", (mid,))
         if row is None:
             return
         try:
             segments = json.loads(row["content"])
         except ValueError:
             return
+        media = [s for s in segments if isinstance(s, dict)
+                 and s.get("type") in ("image", "video", "record", "file")]
+        pairs: list[tuple[dict, str | None]] = []
+        if row["direction"] == "out":
+            for kind in {s["type"] for s in quoted}:
+                mine = [s for s in media if s["type"] == kind]
+                theirs = [s["data"]["url"] for s in quoted if s["type"] == kind]
+                if len(mine) == len(theirs):        # 数不上就不猜
+                    pairs.extend(zip(mine, theirs))
+        else:
+            by_name = {s["data"]["file"]: s["data"]["url"] for s in quoted}
+            pairs = [(s, by_name.get(str((s.get("data") or {}).get("file", ""))))
+                     for s in media]
         changed = False
-        for seg in segments:
-            if not isinstance(seg, dict) or seg.get("type") not in (
-                    "image", "video", "record", "file"):
-                continue
+        for seg, fresh in pairs:
             seg_data = seg.get("data") or {}
-            fresh = fresh_urls.get(str(seg_data.get("file", "")))
-            if fresh and seg_data.get("url") != fresh:
-                seg_data["url"] = fresh
-                if seg_data.get("file_id"):
-                    seg_data["file_id"] = fresh
-                seg["data"] = seg_data
-                changed = True
+            if not fresh or seg_data.get("url") == fresh:
+                continue
+            if seg_data.get("file") == seg_data.get("url"):  # 自己发的 file 也是地址
+                seg_data["file"] = fresh
+            seg_data["url"] = fresh
+            if seg_data.get("file_id"):
+                seg_data["file_id"] = fresh
+            seg["data"] = seg_data
+            changed = True
         if changed:
             await self.db.execute(
                 "UPDATE messages SET content=? WHERE mid=?",
