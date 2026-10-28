@@ -6,6 +6,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from ..t2s import to_simplified
+
 if TYPE_CHECKING:
     from ..bot import BotInstance
 
@@ -115,8 +117,8 @@ def reply_hook(func: Callable[[CommandContext], Awaitable[bool]]):
 
 
 def match_builtin(text: str) -> tuple[str, str] | None:
-    """返回 (命令, 参数) 或 None; 不区分大小写."""
-    text = text.strip()
+    """返回 (命令, 参数) 或 None; 不区分大小写, 繁体也认(獲取信息/啟用/創建bot)."""
+    text = to_simplified(text.strip())
     if text.startswith("/"):
         text = text[1:].strip()
     lowered = text.lower()

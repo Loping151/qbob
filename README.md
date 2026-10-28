@@ -6,7 +6,7 @@
 
 **QQ 官方机器人 → OneBot v11**，简称 qbob
 
-[![version](https://img.shields.io/badge/version-0.1.2-12B7F5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.1.3-12B7F5)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 [![QQ Bot](https://img.shields.io/badge/QQ%20Bot-API%20v2-12B7F5)](https://bot.q.qq.com/wiki/)
@@ -131,7 +131,7 @@ journalctl -u qqbot-onebot -f
 
 ## 其他特性
 
-- **插件**：长文本转图片、合并转发转网页、长链接收短，默认开启，可在管理台开关和配置。
+- **插件**：长文本转图片、合并转发转网页、长链接收短，默认开启；繁体转简体（收到的消息转成简体再交给后端，默认关闭）。都可在管理台开关和配置。
   转网页没有配置可用地址时不生效。自定义插件见[插件开发](docs/plugins.md)
 - **透传**：官方协议框架把 API 地址指向本服务的 `/qqapi/` 即可接入，见[接口文档](docs/api.md#透传qq-官方协议)
 - **自身消息上报**：bot 自己发的消息也作为事件下发，插件可以互相触发
