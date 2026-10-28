@@ -515,7 +515,7 @@ async def get_group_member_list(bot: "BotInstance", params: dict) -> dict:
     group_virtual = _int_of(params.get("group_id"))
     rows = await bot.db.fetchall(
         "SELECT user_openid, nickname, role, last_seen FROM group_members"
-        " WHERE bot_appid=? AND group_openid=? ORDER BY last_seen DESC LIMIT 500",
+        " WHERE bot_appid=? AND group_openid=? ORDER BY last_seen DESC",
         (bot.appid, group_openid),
     )
     members = []
@@ -529,7 +529,7 @@ async def get_group_member_list(bot: "BotInstance", params: dict) -> dict:
     self_role, self_join = await _self_member_role(bot, group_openid)
     members.append(_member_dict(group_virtual, bot.self_id, bot.name, "",
                                 self_role, self_join))
-    # TODO(qq-official): 无全量成员接口, 仅返回发言缓存过的成员
+    # TODO(qq-official): 无全量成员接口, 仅返回发言缓存过的成员(90 天没出现的会被清掉)
     return ok(members)
 
 
@@ -544,9 +544,13 @@ async def get_group_honor_info(bot: "BotInstance", params: dict) -> dict:
 
 @action("get_group_at_all_remain")
 async def get_group_at_all_remain(bot: "BotInstance", params: dict) -> dict:
-    # TODO(qq-official): 群聊无 @全体 能力
-    return ok({"can_at_all": False, "remain_at_all_count_for_group": 0,
-               "remain_at_all_count_for_uin": 0})
+    # 平台: bot 须群管, 每群每天 1 次; 不在名单里的群不打 bot_state
+    group_openid = _resolve_group(bot, params)
+    remain = 0
+    if group_openid is not None and _peer_allowed(bot, "group", group_openid):
+        remain = await bot.sender.at_all_remain(group_openid)
+    return ok({"can_at_all": remain > 0, "remain_at_all_count_for_group": remain,
+               "remain_at_all_count_for_uin": remain})
 
 
 @action("get_group_system_msg")
@@ -652,7 +656,7 @@ async def group_notice_write(bot: "BotInstance", params: dict) -> dict:
     return todo("群公告读写: 官方接口不支持")
 
 
-@action("get_essence_msg_list")
+@action("get_essence_msg_list", "get_group_essence")
 async def get_essence_msg_list(bot: "BotInstance", params: dict) -> dict:
     # TODO(qq-official): 无精华消息 -> 空列表
     return ok([])

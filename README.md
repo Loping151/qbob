@@ -6,7 +6,7 @@
 
 **QQ 官方机器人 → OneBot v11**，简称 qbob
 
-[![version](https://img.shields.io/badge/version-0.1.1-12B7F5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.1.2-12B7F5)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 [![QQ Bot](https://img.shields.io/badge/QQ%20Bot-API%20v2-12B7F5)](https://bot.q.qq.com/wiki/)
@@ -151,7 +151,7 @@ journalctl -u qqbot-onebot -f
 | 表情回应 `set_msg_emoji_like` | 引用那条消息回一个 emoji |
 | 戳一戳 | 一条「@对方 戳了戳你」 |
 | @某人 | 群聊用 markdown 真 @；私聊为「@昵称」文本 |
-| @全体成员 | 「@全体成员」文本 |
+| @全体成员 | bot 是群管时 markdown 真 @全体（平台限每群每天 1 次）；其余为「@全体成员」文本 |
 | QQ 表情 `face` | 对应的 emoji |
 | 音乐、分享、卡片 | 标题加链接 |
 | 群成员列表、好友列表、群列表 | 只有发过言、私聊过、已启用的 |

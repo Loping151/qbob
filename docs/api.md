@@ -124,9 +124,10 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 | `get_stranger_info` | ✅ | 只有昵称, 其余字段为空 |
 | `get_friend_list` | 降级 | 消息保留期内私聊过的用户 |
 | `get_group_info` | ✅ | 官方接口: 群名、人数 |
+| `get_group_at_all_remain` | ✅ | 今天还能否 @全体: bot 是群管且当天没用过为 1, 否则 0 |
 | `get_group_list` | 降级 | 见过且已启用的群 |
 | `get_group_member_info` | 降级 | bot 自己的角色走官方接口; 其他成员来自发言缓存 |
-| `get_group_member_list` | 降级 | 发言过的成员(最多 500) |
+| `get_group_member_list` | 降级 | 近 90 天发言过的成员, 最近发言的在前 |
 | `set_group_ban` | ✅ | 禁言单个成员(bot 须为群管) |
 | `set_group_add_request` | ✅ | 入群申请审批 |
 | `set_friend_add_request` | 降级 | 平台无好友申请, 直接返回成功 |
@@ -137,7 +138,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 | `group_poke` / `friend_poke` / `send_poke` | 降级 | 发一条「@对方 戳了戳你」 |
 | `set_msg_emoji_like` | 降级 | 引用那条消息回一个 emoji |
 | `mark_msg_as_read` 等已读类 / `set_restart` / `clean_cache` | 降级 | 直接返回成功 |
-| `get_group_honor_info` / `get_essence_msg_list` / `_get_group_notice` / `get_group_at_all_remain` / `get_group_system_msg` / 群文件列表类 / `get_online_clients` | 降级 | 返回空数据 |
+| `get_group_honor_info` / `get_essence_msg_list` / `get_group_essence` / `_get_group_notice` / `get_group_system_msg` / 群文件列表类 / `get_online_clients` | 降级 | 返回空数据 |
 | `get_additional_user_detail` / `get_additional_group_detail` | ✅ | 扩展: 头像地址与真实 openid, 见[扩展动作](#扩展动作) |
 | `set_group_whole_ban` / `set_group_kick` / `set_group_admin` / `set_group_card` / `set_group_name` / `set_group_leave` / `set_group_special_title` / `set_group_portrait` / 匿名类 | 无法实现 | |
 | 群公告写 / 精华消息写 / 群文件管理 | 无法实现 | |
@@ -154,7 +155,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 | `video` / `file` | ✅ | |
 | `reply` | ✅ | 真引用 |
 | `at` | 降级 | 群聊用 markdown 真 @(需开 Markdown); 私聊或关闭时为「@昵称」文本。@ 与图片必然拆成两条 |
-| `at`(全体) | 降级 | 「@全体成员」文本, 平台群聊无此能力 |
+| `at`(全体) | 降级 | bot 是群管且开 Markdown 时真 @全体, 平台限每群每天 1 次(北京时间); 用过、非群管或被拒时为「@全体成员」文本 |
 | `face` | 降级 | 对应 emoji, 没有则 `[表情名]` |
 | `poke` | 降级 | 「@对方 戳了戳你」 |
 | `music` / `share` / `json` / `xml` | 降级 | 标题 + 链接 |

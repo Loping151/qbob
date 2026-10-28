@@ -407,11 +407,11 @@ class BotInstance:
             self._fatal_fired = True
             self.on_fatal(reason)
 
-    def _on_credential_error(self, count: int) -> None:
-        """token 端点整轮报 invalid appid or secret; 连续达阈值即自动禁用."""
-        self.last_error = f"invalid appid or secret（凭据错误 ×{count}）"
+    def _on_credential_error(self, count: int, exc) -> None:
+        """token 端点整轮报凭据无效(100016/100007); 连续达阈值即自动禁用."""
+        self.last_error = f"{exc.code} {exc.message}（凭据错误 ×{count}）"
         if count >= CREDENTIAL_DISABLE_AFTER:
-            self._fire_fatal(f"连续 {count} 轮 invalid appid or secret, 凭据无效")
+            self._fire_fatal(f"连续 {count} 轮 {exc.code} {exc.message}, 凭据无效")
 
     def _on_fatal_code(self, count: int, exc) -> None:
         """API 报"bot 已死"类错误码(封禁 11265 等): 与凭据无效同一待遇."""

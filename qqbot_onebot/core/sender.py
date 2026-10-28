@@ -12,7 +12,9 @@
 首段是图片 -> 文字归前面最近的图.
 
 降级:
-- at(markdown 关闭/openid 未知/私聊) -> "@昵称"; at all -> "@全体成员"
+- at(markdown 关闭/openid 未知/私聊) -> "@昵称"
+- at all: 群聊走 markdown 的 <qqbot-at-everyone/>(2026-10-26 起, 10-28 实测可用; bot 须群管,
+  每群每天 1 次); 非群管/当天用过/被拒 -> "@全体成员" 文本
 - 指令标签(markdown 关闭/被拒) -> 指令原文
 - music/share/json/xml -> 标题+链接; face -> emoji/名字
 - node/forward -> 交给 forward_out 插件(转网页), 没人接手就摊平成正文+媒体;
@@ -31,6 +33,7 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
@@ -42,6 +45,7 @@ from ..qq.api import QQApiError
 from ..onebot import events as ob_events
 from ..onebot.segments import emoji_of, normalize_message
 from . import cdnkeys, forwardpage
+from .quota import BEIJING
 from .textimg import (TEXT_IMAGE_MIN_CHARS, extract_links,
                       looks_like_markdown, render_text_image)
 from .uploader import MediaTooLarge
@@ -147,8 +151,22 @@ RECALL_HINT_LIMITED = "为避免刷屏，2分钟内可回复本消息一次性�
 POKE_TEXT = " 戳了戳你"
 
 
+AT_ALL_TAG = "<qqbot-at-everyone />"
+AT_ALL_TEXT = "@全体成员"
 # 转图时要摘出来单发的 at 标签(只在 markdown 里生效, 塞不进图)
-_AT_USER_TAG_RE = re.compile(r'<qqbot-at-user\s+id="[^"]*"\s*/?>')
+_AT_USER_TAG_RE = re.compile(r'<qqbot-at-user\s+id="[^"]*"\s*/?>|<qqbot-at-everyone\s*/?>')
+_AT_ALL_TAG_RE = re.compile(r"<qqbot-at-everyone\s*/?>")
+# @全体被拒后换文本重发; 这些是会话级错误, 换掉标签也照样失败
+_NOT_AT_ALL_CODES = (URL_BLOCK_CODES | RATE_LIMIT_CODES | PROACTIVE_DENIED_CODES
+                     | PASSIVE_EXPIRED_CODES | NOT_IN_GROUP_CODES | MUTED_CODES
+                     | TRANSIENT_CODES)
+
+
+def _beijing_day() -> str:
+    # 平台说「每天 1 次(自然日)」, 按北京时间算
+    return datetime.now(BEIJING).strftime("%Y-%m-%d")
+
+
 # 指令标签(input 填入输入框 / enter 直接发送), 只在 markdown 里生效
 _CMD_TAG_RE = re.compile(r"<qqbot-cmd-(?:input|enter)\b[^>]*>", re.IGNORECASE)
 # 文本改写要跳过标签: 带捕获组切开, 奇数段即标签
@@ -319,6 +337,8 @@ class MessagePlan:
         self.forward_nodes: list[dict] = []
         # 原始 file 字段 -> 本地媒体引用; 落库时替换 base64(否则被截断成残串)
         self.file_urls: dict[str, str] = {}
+        # at all 能否用真 @全体(群聊 + markdown + bot 群管 + 当天没用过)
+        self.at_all_ok = False
 
     def add_text(self, plain: str, md: str | None = None) -> None:
         if not plain and not md:
@@ -333,6 +353,10 @@ class MessagePlan:
 
     def add_at(self, openid: str, display: str) -> None:
         self.add_text(f"@{display} ", f'<qqbot-at-user id="{openid}" /> ')
+        self.items[-1]["has_at"] = True
+
+    def add_at_all(self) -> None:
+        self.add_text(f"{AT_ALL_TEXT} ", f"{AT_ALL_TAG} ")
         self.items[-1]["has_at"] = True
 
     def add_media(self, file_type: int, url: str, name: str = "",
@@ -445,6 +469,8 @@ class Sender:
     def __init__(self, bot: "BotInstance"):
         self.bot = bot
         self._chat_locks = [asyncio.Lock() for _ in range(512)]
+        # 群 openid -> 最近一次用掉 @全体 的北京日期(重启丢了无妨, 最多多被拒一次)
+        self._at_all_day: dict[str, str] = {}
 
     def _lock_for(self, chat_type: str, peer_openid: str) -> asyncio.Lock:
         """同一会话串行发送. 用固定数量的分片锁, 免得每会话一把锁只增不减."""
@@ -457,6 +483,11 @@ class Sender:
                          peer_openid: str = "") -> MessagePlan:
         segments = normalize_message(message)
         plan = MessagePlan()
+        if chat_type == "group" and any(
+                isinstance(seg, dict) and seg.get("type") == "at"
+                and str((seg.get("data") or {}).get("qq", "")) == "all"
+                for seg in segments):
+            plan.at_all_ok = await self.at_all_remain(peer_openid) > 0
         for seg in segments:
             await self._plan_segment(plan, seg, chat_type)
         if plan.forward_nodes:
@@ -484,8 +515,10 @@ class Sender:
         elif seg_type == "at":
             qq = str(data.get("qq", ""))
             if qq == "all":
-                # TODO(qq-official): <qqbot-at-everyone/> 仅频道可用, 群聊降级为文本
-                plan.add_text("@全体成员 ")
+                if plan.at_all_ok:
+                    plan.add_at_all()
+                else:
+                    plan.add_text(f"{AT_ALL_TEXT} ")
                 return
             openid = None
             try:
@@ -574,6 +607,15 @@ class Sender:
             # 未知段: 丢弃并记录, 保持消息可发
             plan.degraded.append(seg_type)
             logger.info("drop unsupported outbound segment type=%s", seg_type)
+
+    async def at_all_remain(self, group_openid: str) -> int:
+        """今天还能真 @全体 几次: markdown 开着、bot 是群管且今天没用过才是 1."""
+        if not group_openid or not self.bot.markdown_enabled:
+            return 0
+        if self._at_all_day.get(group_openid) == _beijing_day():
+            return 0
+        role = await self.bot.group_role(group_openid)
+        return 1 if role in ("admin", "owner") else 0
 
     def _linkify(self, label: str, url: str) -> str:
         """markdown 链接; bot 关闭 md 时退回 '文本 url'."""
@@ -1222,7 +1264,7 @@ class Sender:
             raise SendError(1503, "无被动回复窗口且该会话主动消息未开通")
 
         try:
-            resp = await self._post_message(chat_type, peer_openid, body)
+            resp = await self._post_at_all(chat_type, peer_openid, body)
         except QQApiError as exc:
             if body.get("msg_type") == 2 and plain_fallback is not None and (
                 exc.code in MARKDOWN_REJECT_CODES or exc.status == 400
@@ -1304,6 +1346,29 @@ class Sender:
                     or f"unknown-{int(time.time())}")
         ref_idx = str((resp.get("ext_info") or {}).get("ref_idx", ""))
         return qq_id, ref_idx
+
+    async def _post_at_all(self, chat_type: str, peer_openid: str, body: dict) -> dict:
+        """带 @全体 标签的消息: 发出去就记下今天已用; 被拒换成文本 @全体成员 再发一次.
+
+        被拒的错误码平台没写(非群管/次数用完), 除会话级错误外一律按被拒处理.
+        换掉标签后的错误照常交给调用方分类. body 原地改, 调用方的降级重发要接着用.
+        """
+        markdown = body.get("markdown")
+        content = str(markdown.get("content") or "") if isinstance(markdown, dict) else ""
+        if chat_type != "group" or not _AT_ALL_TAG_RE.search(content):
+            return await self._post_message(chat_type, peer_openid, body)
+        try:
+            resp = await self._post_message(chat_type, peer_openid, body)
+        except QQApiError as exc:
+            if exc.code in _NOT_AT_ALL_CODES or exc.status >= 500:
+                raise
+            self._at_all_day[peer_openid] = _beijing_day()
+            logger.info("[%s] @全体 被拒(%s %s), 改为文本 %s", self.bot.appid,
+                        exc.code, exc.message, AT_ALL_TEXT)
+            body["markdown"] = {**markdown, "content": _AT_ALL_TAG_RE.sub(AT_ALL_TEXT, content)}
+            return await self._post_message(chat_type, peer_openid, body)
+        self._at_all_day[peer_openid] = _beijing_day()
+        return resp
 
     async def _upload_media(
         self, chat_type: str, peer_openid: str, file_type: int, url: str,

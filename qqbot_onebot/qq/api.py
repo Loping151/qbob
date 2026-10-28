@@ -42,7 +42,8 @@ class RateLimiter:
                 await asyncio.sleep(wait)
 
 # 凭据的确定性判决, 不会自愈
-INVALID_CREDENTIAL_CODES = {100016}  # invalid appid or secret(注销的 bot 也报)
+# 100016 invalid appid or secret(注销的 bot 也报); 100007 appid invalid(bot 过期/被删, 2026-10 实测)
+INVALID_CREDENTIAL_CODES = {100016, 100007}
 # "bot 已死": 11265 已封禁. 11254 只是单个接口被封, 不算
 FATAL_BOT_CODES = {11265}
 # 禁言到期补偿秒数(接口往返约 2 秒)
@@ -78,7 +79,7 @@ class QQApiClient:
         self._api_base: str | None = None
         # 连续凭据错误计数(拿到 token 即清零); BotInstance 注入回调做自动禁用
         self.credential_failures = 0
-        self.on_credential_error = None  # (count: int) -> None
+        self.on_credential_error = None  # (count: int, exc: QQApiError) -> None
         # 封禁类错误单独计数: 封禁的 bot 仍能拿 token, 混用会被清零
         self.fatal_code_failures = 0
         self.on_fatal_code = None  # (count: int, exc: QQApiError) -> None
@@ -128,7 +129,7 @@ class QQApiClient:
                 self.credential_failures += 1
                 if self.on_credential_error is not None:
                     try:
-                        self.on_credential_error(self.credential_failures)
+                        self.on_credential_error(self.credential_failures, last_exc)
                     except Exception:
                         logger.exception("on_credential_error callback failed")
             raise last_exc or RuntimeError("no token url configured")
