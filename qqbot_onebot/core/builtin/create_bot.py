@@ -1,5 +1,6 @@
 """创建bot(仅 su): 扫码授权 -> 建 bot -> 引用「号主？」回填 -> 按默认预设配后端.
 
+号主确认前 bot 只入库不上线(否则已能收消息、响应内置指令).
 ask_owner 关闭时跳过回填, 号主记「未知」. 扫码者是号主而非后端主人, 不自动设 su。
 """
 
@@ -44,24 +45,11 @@ def _spawn(coro) -> asyncio.Task:
     return task
 
 
-async def _identity(manager, appid: str, tries: int = 6) -> tuple[str, int, str]:
-    """(名称, QQ号, 头像URL); 刚重载可能未落盘, 短暂重试, 取不到留空."""
-    for attempt in range(tries):
-        live = manager.get_bot(appid)
-        if live is not None:
-            name = live.cfg.get("name") or live.me_info.get("username") or ""
-            bot_qq = int(live.cfg.get("bot_qq") or 0)
-            avatar = str(live.cfg.get("avatar") or live.me_info.get("avatar") or "")
-            if name or bot_qq:
-                return str(name), bot_qq, avatar
-        row = await manager.db.fetchone(
-            "SELECT name, bot_qq, avatar FROM bots WHERE appid=?", (appid,))
-        if row and (row["name"] or row["bot_qq"]):
-            return (str(row["name"] or ""), int(row["bot_qq"] or 0),
-                    str(row["avatar"] or ""))
-        if attempt < tries - 1:
-            await asyncio.sleep(0.5)
-    return "", 0, ""
+async def _identity(manager, appid: str) -> tuple[str, int, str]:
+    """(名称, QQ号, 头像URL); 只拉平台身份不启动 bot, 取不到留空."""
+    cfg = await manager.probe_identity(appid)
+    return (str(cfg.get("name") or ""), int(cfg.get("bot_qq") or 0),
+            str(cfg.get("avatar") or ""))
 
 
 def owner_id_of(raw: str) -> str:
@@ -169,11 +157,11 @@ async def _wait_and_create(ctx: CommandContext, manager, task) -> None:
         await ctx.say(f"该 bot({appid}) 已存在，未做任何改动")
         return
 
+    # 先不启用, 号主确认后由 _finish 放上线
     await insert_bot(manager.db, getattr(manager, "config", None),
-                     {"appid": appid, "secret": secret})
+                     {"appid": appid, "secret": secret, "enabled": 0})
     if hasattr(manager, "mark_setup_done"):
         await manager.mark_setup_done()
-    await manager.reload_bot(appid)
     logger.info("创建bot: %s 已创建, 等待号主回填", appid)
 
     name, bot_qq, avatar = await _identity(manager, appid)
@@ -185,9 +173,11 @@ async def _wait_and_create(ctx: CommandContext, manager, task) -> None:
         await ctx.say(f"已接入: {shown}\nAppID: {appid}\n"
                       + await _finish(manager, appid, UNKNOWN_OWNER), image=avatar)
         return
-    mid = await ctx.say(f"已接入: {shown}\nAppID: {appid}\n号主？", image=avatar)
+    # 引用「创建bot」那条, su 不盯着群也能收到提醒
+    mid = await ctx.say(f"已接入: {shown}\nAppID: {appid}\n号主？",
+                        image=avatar, quote=True)
     if mid is None:
-        await ctx.say("bot 已创建，但我没法追问号主，请到管理台手动配置后端")
+        await ctx.say("bot 已创建但未启用，我没法追问号主，请到管理台配置后端并启用")
         return
     key = (ctx.chat_type, ctx.peer_openid)
     stale = _pending_owner.get(key)
@@ -258,16 +248,21 @@ async def on_owner_reply(ctx: CommandContext) -> bool:
 
 
 async def _finish(manager, appid: str, description: str) -> str:
-    """配后端并返回回执; 失败原因只进日志, 群里不回显运维细节."""
+    """启用 bot 并配后端, 返回回执; 失败原因只进日志, 群里不回显运维细节."""
+    await manager.db.execute("UPDATE bots SET enabled=1 WHERE appid=?", (appid,))
     try:
         result = await provision_backend(manager, appid, description)
     except NoDefaultProfile:
-        return "✅ 完成（未设置默认后端预设）"
+        receipt = "✅ 完成（未设置默认后端预设）"
     except Exception as exc:
         logger.warning("创建bot 配后端失败 appid=%s: %s", appid, exc)
-        return "bot 已创建，但配置后端失败，可到管理台「配置后端」重试"
-    return ("✅ 完成" if result["applied"]
-            else "✅ 完成（已写入 BS 配置文件，需重启 BS 后生效）")
+        receipt = "bot 已创建，但配置后端失败，可到管理台「配置后端」重试"
+    else:
+        # 配后端成功时已顺带重载上线
+        return ("✅ 完成" if result["applied"]
+                else "✅ 完成（已写入 BS 配置文件，需重启 BS 后生效）")
+    await manager.reload_bot(appid)
+    return receipt
 
 
 async def provision_backend(manager, appid: str, description: str) -> dict:

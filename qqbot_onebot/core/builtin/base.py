@@ -52,9 +52,11 @@ class CommandContext:
             logger.warning("builtin reply failed: %s", exc)
             return None
 
-    async def say(self, text: str, image: str = "") -> int | None:
-        """不带引用地发一条; 带 image 则图文同气泡."""
+    async def say(self, text: str, image: str = "", quote: bool = False) -> int | None:
+        """发一条, 默认不带引用(quote 则引用触发消息); 带 image 则图文同气泡."""
         segments: list[dict] = []
+        if quote:
+            segments.append({"type": "reply", "data": {"id": str(self.reply_mid)}})
         if image:
             segments.append({"type": "image", "data": {"file": image}})
         segments.append({"type": "text", "data": {"text": text}})
@@ -65,7 +67,7 @@ class CommandContext:
             if image:
                 # 图挂了退回纯文本重试
                 logger.warning("builtin say(图文) failed, 退回纯文本: %s", exc)
-                return await self.say(text)
+                return await self.say(text, quote=quote)
             logger.warning("builtin say failed: %s", exc)
             return None
 

@@ -6,7 +6,7 @@
 
 **QQ 官方机器人 → OneBot v11**，简称 qbob
 
-[![version](https://img.shields.io/badge/version-0.1.3-12B7F5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.1.4-12B7F5)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 [![QQ Bot](https://img.shields.io/badge/QQ%20Bot-API%20v2-12B7F5)](https://bot.q.qq.com/wiki/)
@@ -105,7 +105,7 @@ journalctl -u qqbot-onebot -f
 
 **4. 用 `创建bot` 接入更多 bot。** superuser 私聊或在群里发 `创建bot`，得到一个授权链接，
 任何人点开授权就能把自己的 bot 连过来。默认要发 `创建bot` 的那位 superuser **引用 bot 的「号主？」并回复号主 QQ 号**来批准，
-批准后按默认后端预设接入；回复的不是 QQ 号、或 1 小时没人回，就取消并删掉这个 bot。
+批准前 bot 不上线，批准后按默认后端预设接入；回复的不是 QQ 号、或 1 小时没人回，就取消并删掉这个 bot。
 
 <p align="center"><img src="docs/assets/demo_create.png" width="300" alt="创建bot"></p>
 

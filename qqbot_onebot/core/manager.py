@@ -114,7 +114,7 @@ class BotManager:
                               "secret": str(seed["secret"])}, ignore_existing=True)
             logger.info("seeded bot %s from config", seed["appid"])
 
-    async def _launch(self, bot_cfg: dict) -> None:
+    def _build(self, bot_cfg: dict) -> BotInstance:
         assert self.http is not None
         bot = BotInstance(
             bot_cfg,
@@ -126,6 +126,19 @@ class BotManager:
                         asyncio.create_task(self.auto_disable_bot(appid, reason)))
         # 内置指令需要回引 manager
         bot.manager = self
+        return bot
+
+    async def probe_identity(self, appid: str) -> dict:
+        """不启动 bot(不连网关), 只跟一次平台身份并落库; 返回更新后的配置, 查无此 bot 为空."""
+        row = await self.db.fetchone("SELECT * FROM bots WHERE appid=?", (appid,))
+        if row is None:
+            return {}
+        bot = self._build(row_to_bot(row))
+        await bot.sync_identity()
+        return bot.cfg
+
+    async def _launch(self, bot_cfg: dict) -> None:
+        bot = self._build(bot_cfg)
         self.bots[bot.appid] = bot
         try:
             await bot.start()
