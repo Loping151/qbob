@@ -287,6 +287,8 @@ class BotInstance:
         self._drop_logged: dict[tuple[str, str], float] = {}
         self.me_info: dict = {}
         self.started = False
+        # 创建bot 号主确认前: 连着网关但事件一律丢弃(不响应内置指令)
+        self.muted = False
         # QQ 侧连通性: ws 模式看网关会话, webhook 模式看最近一次收到平台事件
         self.gateway_connected = False
         self.last_event_at: float = 0.0
@@ -786,6 +788,8 @@ class BotInstance:
     async def dispatch_qq_event(self, event_type: str, data: dict,
                                 event_id: str = "") -> None:
         self.last_event_at = time.time()
+        if self.muted:
+            return
         try:
             await self._dispatch(event_type, data, event_id)
         except Exception:

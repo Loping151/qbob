@@ -128,24 +128,17 @@ class BotManager:
         bot.manager = self
         return bot
 
-    async def probe_identity(self, appid: str) -> dict:
-        """不启动 bot(不连网关), 只跟一次平台身份并落库; 返回更新后的配置, 查无此 bot 为空."""
-        row = await self.db.fetchone("SELECT * FROM bots WHERE appid=?", (appid,))
-        if row is None:
-            return {}
-        bot = self._build(row_to_bot(row))
-        await bot.sync_identity()
-        return bot.cfg
-
-    async def _launch(self, bot_cfg: dict) -> None:
+    async def _launch(self, bot_cfg: dict, muted: bool = False) -> None:
         bot = self._build(bot_cfg)
+        bot.muted = muted
         self.bots[bot.appid] = bot
         try:
             await bot.start()
         except Exception:
             logger.exception("bot %s failed to start", bot.appid)
             return
-        self._maybe_set_default(bot)
+        if not muted:
+            self._maybe_set_default(bot)
 
     async def mark_setup_done(self) -> None:
         """出现第二个 bot 或任何 su 即置 setup_done; 只会变 true."""
@@ -177,8 +170,12 @@ class BotManager:
     def get_bot(self, appid: str) -> BotInstance | None:
         return self.bots.get(appid)
 
-    async def reload_bot(self, appid: str) -> None:
-        """重启单个 bot(串行化, 防双实例抢 BS 连接)."""
+    async def reload_bot(self, appid: str, pending: bool = False) -> None:
+        """重启单个 bot(串行化, 防双实例抢 BS 连接).
+
+        pending: 号主确认前, 未启用也连网关(扫码页要等 bot 在线才显示已连接),
+        但不处理任何事件.
+        """
         async with self._reload_lock(appid):
             existing = self.bots.pop(appid, None)
             if existing is not None:
@@ -189,6 +186,8 @@ class BotManager:
             bot_cfg = row_to_bot(row)
             if bot_cfg["enabled"]:
                 await self._launch(bot_cfg)
+            elif pending:
+                await self._launch(bot_cfg, muted=True)
 
     async def remove_bot(self, appid: str) -> None:
         """删 bot 并级联清掉其所有数据(否则 id_map 等孤儿常驻内存)."""

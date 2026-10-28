@@ -1,6 +1,7 @@
 """创建bot(仅 su): 扫码授权 -> 建 bot -> 引用「号主？」回填 -> 按默认预设配后端.
 
-号主确认前 bot 只入库不上线(否则已能收消息、响应内置指令).
+号主确认前 bot 连着网关但不处理事件: 扫码页要等 bot 在线才显示「已连接」,
+又不能提前响应内置指令.
 ask_owner 关闭时跳过回填, 号主记「未知」. 扫码者是号主而非后端主人, 不自动设 su。
 """
 
@@ -46,8 +47,9 @@ def _spawn(coro) -> asyncio.Task:
 
 
 async def _identity(manager, appid: str) -> tuple[str, int, str]:
-    """(名称, QQ号, 头像URL); 只拉平台身份不启动 bot, 取不到留空."""
-    cfg = await manager.probe_identity(appid)
+    """(名称, QQ号, 头像URL); 取自刚拉起的静默实例, 取不到留空."""
+    live = manager.get_bot(appid)
+    cfg = live.cfg if live is not None else {}
     return (str(cfg.get("name") or ""), int(cfg.get("bot_qq") or 0),
             str(cfg.get("avatar") or ""))
 
@@ -157,11 +159,12 @@ async def _wait_and_create(ctx: CommandContext, manager, task) -> None:
         await ctx.say(f"该 bot({appid}) 已存在，未做任何改动")
         return
 
-    # 先不启用, 号主确认后由 _finish 放上线
+    # 先不启用, 号主确认后由 _finish 放上线; 网关先连上, 号主那边才不卡「连接中」
     await insert_bot(manager.db, getattr(manager, "config", None),
                      {"appid": appid, "secret": secret, "enabled": 0})
     if hasattr(manager, "mark_setup_done"):
         await manager.mark_setup_done()
+    await manager.reload_bot(appid, pending=True)
     logger.info("创建bot: %s 已创建, 等待号主回填", appid)
 
     name, bot_qq, avatar = await _identity(manager, appid)
@@ -177,6 +180,7 @@ async def _wait_and_create(ctx: CommandContext, manager, task) -> None:
     mid = await ctx.say(f"已接入: {shown}\nAppID: {appid}\n号主？",
                         image=avatar, quote=True)
     if mid is None:
+        await manager.reload_bot(appid)     # 停掉静默实例
         await ctx.say("bot 已创建但未启用，我没法追问号主，请到管理台配置后端并启用")
         return
     key = (ctx.chat_type, ctx.peer_openid)
