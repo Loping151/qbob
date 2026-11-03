@@ -79,8 +79,11 @@ class MediaStore:
         return token
 
     def put_named(self, token: str, data: bytes) -> str:
-        """按指定名字存(如语音转码结果按源 URL 记)."""
-        if self.resolve(token) is None and "/" not in token and not token.startswith("."):
+        """按指定名字存(如语音转码结果按源 URL 记); 已有就续期, 别刚交出去就被清理掉."""
+        existing = self.resolve(token)
+        if existing is not None:
+            existing.touch()
+        elif "/" not in token and not token.startswith("."):
             tmp = self.dir / f".tmp-{secrets.token_hex(8)}"
             tmp.write_bytes(data)
             tmp.replace(self.dir / token)

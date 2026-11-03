@@ -1,7 +1,7 @@
 """OneBot 消息段 -> QQ 官方消息 发送管线.
 
 平台硬约束(实测, 文档没写全):
-- msg_type 三选一: 0 纯文本 / 2 markdown / 7 富媒体; 7 可带 content -> 图文同一气泡.
+- msg_type: 0 纯文本 / 2 markdown / 7 富媒体 / 8 图文卡片(见 cards); 7 可带 content -> 图文同一气泡.
 - markdown 与 media 不能共存(图片被静默吞掉); 7 再带 markdown -> 22006.
 - <qqbot-at-user/> 与 <qqbot-cmd-input/enter/> 只在 msg_type=2 生效, 进纯文本会坏
   => "@某人 + 图片" 必然是两条消息.
@@ -16,8 +16,9 @@
 - at all: 群聊走 markdown 的 <qqbot-at-everyone/>(2026-10-26 起, 10-28 实测可用; bot 须群管,
   每群每天 1 次); 非群管/当天用过/被拒 -> "@全体成员" 文本
 - 指令标签(markdown 关闭/被拒) -> 指令原文
-- music/share/json/xml -> 标题+链接; face -> emoji/名字
-- node/forward -> 交给 forward_out 插件(转网页), 没人接手就摊平成正文+媒体;
+- share/music/json(小程序等) -> 图文卡片(要 https 跳转和封面; 卡片单独一条, 不带引用,
+  被拒改发文字), 否则标题+链接; xml -> 标题+链接; face -> emoji/名字
+- node/forward -> 交给 forward_out 插件(转网页, 发「聊天记录」卡片), 没人接手就摊平成正文+媒体;
   兑换码类(无媒体)摊平成纯文本留在群里复制
 - record -> silk 直传, 其余 ffmpeg 解 pcm 后 pilk 编 silk
 - markdown 图片 ![](url) -> 原生富媒体(不带尺寸渲染会坏)
@@ -27,6 +28,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -38,16 +40,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import unquote, urlparse
 
+import aiohttp
+
 from ..config import option
 from ..idmap import is_virtual_id
 from ..plugin import HookContext, registry as plugins
 from ..qq.api import QQApiError
 from ..onebot import events as ob_events
 from ..onebot.segments import emoji_of, normalize_message
-from . import cdnkeys, forwardpage
+from . import cards, cdnkeys, forwardpage, textimg
 from .quota import BEIJING
-from .textimg import (TEXT_IMAGE_MIN_CHARS, extract_links,
-                      looks_like_markdown, render_text_image)
+from .textimg import TEXT_IMAGE_MIN_CHARS, extract_links, looks_like_markdown
 from .uploader import MediaTooLarge
 
 if TYPE_CHECKING:
@@ -57,6 +60,13 @@ logger = logging.getLogger("qqbot.sender")
 
 # 转发网页建页时同时上传几个媒体(瓶颈是每张 3 次 API 往返, 不是带宽)
 PAGE_UPLOAD_CONCURRENCY = 8
+# _send_one 的 slot 缺省: 现取被动回复名额
+_ACQUIRE = object()
+# 做卡片封面时拉原图的大小上限
+COVER_FETCH_MAX = 30 * 1024 * 1024
+# 平台语音时长上限 300 秒(2026-11-02 只上传不发送实测: 300 收, 301 起 40093013
+# 「上传音频时长超过限制」); 留 1 秒余量, 超出的截掉, 别让整首歌发不出去
+VOICE_MAX_SECONDS = 299
 # ---- 平台错误码分类(对照官方错误码表; 标"表外"的是实测撞见的) ----
 URL_BLOCK_CODES = {40054010, 304003, 40034104}       # 后两个表外
 # 真频控(等一等有用). 11244/22009 表外
@@ -69,16 +79,23 @@ PASSIVE_EXPIRED_CODES = {40034128, 40034005, 304103,
 # bot 在该群已无资格说话: 不重试, 但复查群状态
 NOT_IN_GROUP_CODES = {40054003, 40034101}
 MUTED_CODES = {40054002}
-# 瞬时故障 / bot 短暂离线
-TRANSIENT_CODES = {50055001, 50055006, 40034004, 40054016}
-# 消息本身有问题: 不复查也不重试
+# 私聊: 不是好友 / 用户拒收. 私聊没有状态接口可复查, 不重试
+PEER_REFUSED_CODES = {40054004, 40054013}
+# 瞬时故障 / bot 短暂离线. 50055002/40054006/340067 是单聊表的
+TRANSIENT_CODES = {50055001, 50055006, 40034004, 40054016,
+                   50055002, 40054006, 340067}
+# 消息本身有问题: 不复查也不重试. 后一行是单聊表的(召回/订阅按钮/输入中状态本服务不用)
 BAD_MESSAGE_CODES = {304061, 340069, 305007, 304064, 304080,
                      40054007, 40054005, 40034006, 40034029,
-                     40034106, 40034108, 40034109}
+                     40034106, 40034108, 40034109,
+                     40054018, 40034122, 40034123, 304062, 50059}
 # markdown 不被接受时降级为纯文本重发. 必须收全, 漏一个就整条发不出去
 MARKDOWN_REJECT_CODES = {22006, 304004, 304036, 40034127,
                          40034008, 40034009, 40034010, 40034011, 40034124,
                          40034104, 40034021}          # 后两个表外
+# 图文卡片被拒时改发文字. 表外实测: 封面平台拉不到 / 字段不合法 / 缺 card(HTTP 500);
+# 别的 4xx 只要不是会话级错误也改发(见 _send_one)
+CARD_REJECT_CODES = {40034141, 40011021, 305011}
 FILE_TYPE_IMAGE, FILE_TYPE_VIDEO, FILE_TYPE_VOICE, FILE_TYPE_FILE = 1, 2, 3, 4
 
 _MD_BLOCK_START = re.compile(r"^\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>\s|\||```|(?:\*\s*){3,}$)")
@@ -156,10 +173,10 @@ AT_ALL_TEXT = "@全体成员"
 # 转图时要摘出来单发的 at 标签(只在 markdown 里生效, 塞不进图)
 _AT_USER_TAG_RE = re.compile(r'<qqbot-at-user\s+id="[^"]*"\s*/?>|<qqbot-at-everyone\s*/?>')
 _AT_ALL_TAG_RE = re.compile(r"<qqbot-at-everyone\s*/?>")
-# @全体被拒后换文本重发; 这些是会话级错误, 换掉标签也照样失败
-_NOT_AT_ALL_CODES = (URL_BLOCK_CODES | RATE_LIMIT_CODES | PROACTIVE_DENIED_CODES
-                     | PASSIVE_EXPIRED_CODES | NOT_IN_GROUP_CODES | MUTED_CODES
-                     | TRANSIENT_CODES)
+# 会话级错误: 换个消息形态也照样失败(@全体换文本、卡片换文字都不该重发)
+_SESSION_CODES = (URL_BLOCK_CODES | RATE_LIMIT_CODES | PROACTIVE_DENIED_CODES
+                  | PASSIVE_EXPIRED_CODES | NOT_IN_GROUP_CODES | MUTED_CODES
+                  | PEER_REFUSED_CODES | TRANSIENT_CODES)
 
 
 def _beijing_day() -> str:
@@ -330,7 +347,7 @@ class MessagePlan:
     """拆解后的发送计划. items 保序(图文配对依赖); 文本同时维护 plain 与 md 两版."""
 
     def __init__(self) -> None:
-        self.items: list[dict] = []  # {"kind":"text"|"media", ...}
+        self.items: list[dict] = []  # {"kind":"text"|"media"|"card", ...}
         self.prefer_reply_mid: int | None = None
         self.degraded: list[str] = []
         # 合并转发的节点先攒着: 能建网页就整批换成一条链接, 建不了才摊平
@@ -339,6 +356,11 @@ class MessagePlan:
         self.file_urls: dict[str, str] = {}
         # at all 能否用真 @全体(群聊 + markdown + bot 群管 + 当天没用过)
         self.at_all_ok = False
+        # 发给谁: 卡片封面要传到这个群换 CDN 直链
+        self.chat_type = ""
+        self.peer_openid = ""
+        # 摊平的转发节点里卡片不会单独成条, 不必做封面
+        self.allow_cards = True
 
     def add_text(self, plain: str, md: str | None = None) -> None:
         if not plain and not md:
@@ -365,6 +387,11 @@ class MessagePlan:
         self.items.append({"kind": "media", "file_type": file_type, "url": url,
                            "name": name, "token": token})
 
+    def add_card(self, card: dict, plain: str, md: str | None = None) -> None:
+        """图文卡片单独成一条; plain/md 是卡片被拒时改发的文字."""
+        self.items.append({"kind": "card", "card": card, "plain": plain,
+                           "md": md or plain})
+
     @property
     def plain_text(self) -> str:
         return "".join(i["plain"] for i in self.items
@@ -376,7 +403,8 @@ class MessagePlan:
                 for i in self.items if i["kind"] == "media"]
 
     def is_empty(self) -> bool:
-        return not self.plain_text and not self.media
+        return (not self.plain_text and not self.media
+                and not any(i["kind"] == "card" for i in self.items))
 
 
 def merge_text_items(first: dict | None, second: dict) -> dict:
@@ -411,6 +439,11 @@ def _swap_media_urls(segments: list[dict], file_urls: dict[str, str]) -> list[di
             if url:
                 data["file"] = url
                 data["url"] = url
+        elif seg.get("type") in ("share", "music"):
+            # 卡片封面: base64 换成给平台的地址
+            url = file_urls.get(str(data.get("image") or ""))
+            if url:
+                data["image"] = url
         elif isinstance(data.get("content"), (list, dict)):
             # node 的媒体在 data.content 里(单个 dict 补成数组)
             content = data["content"]
@@ -483,6 +516,7 @@ class Sender:
                          peer_openid: str = "") -> MessagePlan:
         segments = normalize_message(message)
         plan = MessagePlan()
+        plan.chat_type, plan.peer_openid = chat_type, peer_openid
         if chat_type == "group" and any(
                 isinstance(seg, dict) and seg.get("type") == "at"
                 and str((seg.get("data") or {}).get("qq", "")) == "all"
@@ -583,14 +617,21 @@ class Sender:
                 plan.degraded.append("forward")
                 plan.add_text("[聊天记录]")
         elif seg_type in ("music", "share"):
-            self._plan_link_card(plan, seg_type, data)
+            await self._plan_link_card(plan, seg_type, data)
         elif seg_type in ("json", "xml"):
             text, url = _extract_card_text(data)
-            if url:
-                # 卡片带跳转链接 -> markdown 链接(md 关闭/被拒时降级为 文本 url)
-                plan.add_text(self._linkify(text, url) + "\n")
-            else:
+            if not url:
                 plan.add_text(text)
+                return
+            # 卡片带跳转链接 -> markdown 链接(md 关闭/被拒时降级为 文本 url)
+            line = self._linkify(text, url) + "\n"
+            fields = _ark_card_fields(data) if seg_type == "json" else None
+            card = (await self._link_card(plan, *fields)
+                    if fields and plan.allow_cards else None)
+            if card:
+                plan.add_card(card, line)
+            else:
+                plan.add_text(line)
         elif seg_type == "face":
             # emoji, 拿不到就用官方名字([赞])
             plan.add_text(emoji_of(data.get("id")))
@@ -624,8 +665,9 @@ class Sender:
             return f"[{label}]({url})"
         return f"{label} {url}"
 
-    def _plan_link_card(self, plan: MessagePlan, seg_type: str, data: dict) -> None:
-        """music/share 段 -> markdown 链接; 只有 id 的平台音乐按模板拼 url."""
+    async def _plan_link_card(self, plan: MessagePlan, seg_type: str, data: dict) -> None:
+        """music/share 段 -> 图文卡片(有 https 跳转和图时), 否则 markdown 链接;
+        只有 id 的平台音乐按模板拼 url(没有图, 发链接)."""
         subtype = str(data.get("type") or "")
         title = str(data.get("title") or "")
         content = str(data.get("content") or "")
@@ -643,7 +685,50 @@ class Sender:
             line = f"{icon}{label}"
         if content and content != label:
             line += f" — {content}"
-        plan.add_text(line + "\n")
+        image = data.get("image") or data.get("cover")
+        card = (await self._link_card(plan, label, content, url, image)
+                if url and plan.allow_cards else None)
+        if card:
+            plan.add_card(card, line + "\n")
+        else:
+            plan.add_text(line + "\n")
+
+    async def _link_card(self, plan: MessagePlan, title: str, desc: str, url: str,
+                         image) -> dict | None:
+        """链接类卡片. image: http(s) 直接交给平台拉; base64:// / file:// / 本地路径
+        处理成封面后给平台一个能拉的地址(见 _cover_url), 给不出就不发卡片."""
+        image = str(image or "").strip()
+        if image.startswith("//"):
+            image = "https:" + image
+        if not str(url or "").startswith("https://") or not image:
+            return None
+        if image.startswith(("http://", "https://")):
+            return cards.build(title, desc, url, image)
+        blob, _ = await asyncio.to_thread(self.bot.media.load_bytes, image)
+        jpeg = blob and await asyncio.to_thread(cards.make_cover, blob)
+        pic = jpeg and await self._cover_url(plan, jpeg)
+        if not pic:
+            return None
+        plan.file_urls[image] = pic             # 落库/回报别带 base64(见 _swap_media_urls)
+        return cards.build(title, desc, url, pic)
+
+    async def _cover_url(self, plan: MessagePlan, jpeg: bytes, base: str | None = None) -> str:
+        """封面给平台拉的地址: 群聊有新鲜 rkey 就传给平台用 CDN 直链(实测稳), 否则经
+        转发网页地址(base, 不给就按配置取)的 /f/c/ 自托管(隧道慢时平台会拉超时); 都不行返回空串."""
+        rkey = cdnkeys.fresh().get("1407") if plan.chat_type == "group" else ""
+        if rkey and plan.peer_openid:
+            try:
+                done = await self.bot.uploader.upload_media(
+                    "group", plan.peer_openid, FILE_TYPE_IMAGE, jpeg, "cover.jpg",
+                    need_uuid=True)
+                if done["file_uuid"]:
+                    return cdnkeys.with_rkey(cdnkeys.cdn_url("1407", done["file_uuid"]), rkey)
+            except Exception as exc:
+                logger.info("[%s] 封面上传失败, 改自托管: %r", self.bot.appid, exc)
+        if base is None:
+            config = getattr(getattr(self.bot, "manager", None), "config", None)
+            base = forwardpage.page_base(config)[0]
+        return cards.host(self.bot.media, base, jpeg) if base else ""
 
     def _option(self, name: str, default):
         return option(self.bot, name, default)
@@ -727,6 +812,12 @@ class Sender:
             return
         handled = await plugins.first(
             "forward_out", HookContext(self.bot, chat_type, peer_openid, plan), nodes)
+        if isinstance(handled, dict):
+            if handled.get("card"):
+                plan.add_card(handled["card"], handled["plain"], handled.get("md"))
+            else:
+                plan.add_text(handled["plain"], handled.get("md") or None)
+            return
         if handled is not None:
             plain, md = handled if isinstance(handled, tuple) else (handled, handled)
             plan.add_text(plain, md)
@@ -737,11 +828,84 @@ class Sender:
                 plan, {"content": node["segments"]}, chat_type)
 
     async def build_forward_page(self, plan: MessagePlan, nodes: list[dict],
-                                 peer_openid: str, base: str) -> tuple[str, str]:
-        """转发节点建成一页网页, 返回要发的 (纯文本, markdown).
+                                 peer_openid: str, base: str,
+                                 jump: bool = False) -> tuple[str, str]:
+        """转发节点建成一页网页, 返回要发的 (纯文本, markdown); jump: 链接经腾讯文档跳转.
 
         媒体一张传不上就整页不建, 抛 SendError(1400/1500).
         """
+        url = await self.create_forward_page(plan, nodes, peer_openid, base)
+        return self._forward_link_text(nodes, cards.docs_jump(url) if jump else url)
+
+    def _forward_link_text(self, nodes: list[dict], url: str) -> tuple[str, str]:
+        head = f"📄 {forwardpage.summarize(nodes)} "
+        return head + f"点击查看 {url}", head + self._linkify("点击查看", url)
+
+    async def build_forward_card(self, plan: MessagePlan, nodes: list[dict],
+                                 base: str, jump: bool = False) -> dict:
+        """转发节点建成本服务的网页, 返回 {"card", "plain", "md"} 给 forward_out(群聊).
+
+        卡片见 _forward_card; jump: 卡片和链接都经腾讯文档的外链跳转页打开(见 cards.docs_jump).
+        做不成卡片时 card 为 None, 发 plain/md 链接.
+        """
+        # 建页会把节点里的媒体换成 CDN 地址, 先把原图的来路拿到手
+        candidates = cards.first_images(nodes)
+        url = await self.create_forward_page(plan, nodes, plan.peer_openid, base)
+        return await self._forward_card(
+            plan, nodes, candidates, cards.docs_jump(url) if jump else url, base)
+
+    async def _forward_card(self, plan: MessagePlan, nodes: list[dict], candidates: list[dict],
+                            url: str, base: str) -> dict:
+        """「聊天记录」卡片: 简介是条数与图片数, 封面取第一张图(长图只取顶部), 没图就把前几条
+        文字渲染成图, 封面地址见 _cover_url. 做不成卡片时 card 为 None, 发 plain/md 链接."""
+        plain, md = self._forward_link_text(nodes, url)
+        if not url.startswith("https://"):      # 卡片跳转只认 https, 别白做封面
+            return {"card": None, "plain": plain, "md": md}
+        jpeg = None
+        for data in candidates:
+            blob = await self._image_bytes(data)
+            jpeg = blob and await asyncio.to_thread(cards.make_cover, blob)
+            if jpeg:
+                break
+        preview = "" if jpeg else cards.chat_preview(nodes)
+        if preview:
+            png = await textimg.render_text_image(preview)
+            jpeg = png and await asyncio.to_thread(cards.make_cover, png, text=True)
+        pic = jpeg and await self._cover_url(plan, jpeg, base)
+        card = cards.build("聊天记录", forwardpage.summarize(nodes), url, pic) if pic else None
+        if card is None:
+            logger.info("[%s] 聊天记录做不出卡片封面, 发链接", self.bot.appid)
+        return {"card": card, "plain": plain, "md": md}
+
+    async def _image_bytes(self, data: dict) -> bytes | None:
+        """图片段 -> 字节: QQ 直链换新 rkey 再拉, 外链直接拉, base64/本地读出来."""
+        raw = str(data.get("url") or data.get("file") or "")
+        if raw.startswith(("http://", "https://")):
+            if cdnkeys.is_cdn(raw):
+                rkey = cdnkeys.fresh().get(cdnkeys.appid_of(raw))
+                if rkey:
+                    raw = cdnkeys.with_rkey(raw, rkey)
+            return await self._fetch_bytes(raw)
+        if not raw:
+            return None
+        blob, _ = await asyncio.to_thread(self.bot.media.load_bytes, raw)
+        return blob
+
+    async def _fetch_bytes(self, url: str, limit: int = COVER_FETCH_MAX) -> bytes | None:
+        try:
+            async with self.bot.http.get(
+                    url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.content.read(limit + 1)
+        except Exception as exc:
+            logger.info("[%s] 拉图失败 %s: %r", self.bot.appid, url[:80], exc)
+            return None
+        return data if len(data) <= limit else None
+
+    async def create_forward_page(self, plan: MessagePlan, nodes: list[dict],
+                                  peer_openid: str, base: str) -> str:
+        """转发节点建成一页网页(媒体上传给平台换 CDN 地址), 返回网页地址."""
         for node in nodes:
             node["avatar"] = self._avatar_of(node.pop("uid", 0))
         # token 按上传前的内容算: 同一份转发再发时页面已在, 不再上传
@@ -774,9 +938,7 @@ class Sender:
                 (token, self.bot.appid, json.dumps(nodes, ensure_ascii=False),
                  int(time.time())),
             )
-        url = f"{base.rstrip('/')}/f/{token}"
-        head = f"📄 {forwardpage.summarize(nodes)} "
-        return head + f"点击查看 {url}", head + self._linkify("点击查看", url)
+        return f"{base.rstrip('/')}/f/{token}"
 
     def _avatar_of(self, virtual_id: int) -> str:
         """节点发送者头像: idmap 用户走 q.qlogo.cn/qqapp/{appid}/{openid}/100, bot 用配置里的;
@@ -867,6 +1029,7 @@ class Sender:
         """合并转发节点 -> 逐行正文(不带发送者名); 节点内媒体全部照发."""
         content = data.get("content")
         sub_plan = MessagePlan()
+        sub_plan.allow_cards = False            # 卡片在这里只会变回链接文字
         for seg in normalize_message(content):
             await self._plan_segment(sub_plan, seg, chat_type)
         # 嵌套 node 就地继续摊平(排在本节点正文之后)
@@ -885,7 +1048,7 @@ class Sender:
                                item.get("name", ""), token=item.get("token"))
 
     async def _prepare_voice(self, file_field: str) -> tuple[str | None, str | None]:
-        """音频落本地并转 silk -> (引用 URL, 本地 token)."""
+        """音频落本地并转 silk -> (引用 URL, 本地 token); 超过平台时长上限的截掉尾巴."""
         url, token = self.bot.media.ingest_file_field(file_field)
         if token is None and url is None:
             return None, None
@@ -896,25 +1059,34 @@ class Sender:
             src = self.bot.media.resolve(token)
         if src is None:
             return None, None
-        head = src.read_bytes()[:16]
-        if head.startswith((b"\x02#!SILK_V3", b"#!SILK_V3")):
-            silk_token = token if token and src.suffix == ".silk" else \
-                self.bot.media.put_bytes(src.read_bytes(), ".silk")
-            return self.bot.media.ref(silk_token), silk_token
         try:
             import pilk  # noqa: PLC0415
+            is_silk = src.read_bytes()[:16].startswith((b"\x02#!SILK_V3", b"#!SILK_V3"))
+            if is_silk and pilk.get_duration(str(src)) <= VOICE_MAX_SECONDS * 1000:
+                silk_token = token if token and src.suffix == ".silk" else \
+                    self.bot.media.put_bytes(src.read_bytes(), ".silk")
+                return self.bot.media.ref(silk_token), silk_token
             with tempfile.TemporaryDirectory() as tmp_dir:
                 pcm = Path(tmp_dir) / "audio.pcm"
                 silk = Path(tmp_dir) / "audio.silk"
-                proc = await asyncio.to_thread(
-                    subprocess.run,
-                    ["ffmpeg", "-y", "-i", str(src), "-f", "s16le", "-ar", "24000",
-                     "-ac", "1", str(pcm)],
-                    capture_output=True, timeout=60,
-                )
-                if proc.returncode != 0:
-                    logger.warning("ffmpeg decode failed: %s", proc.stderr[-300:])
-                    return None, None
+                if is_silk:
+                    # 太长的 silk: 解回 pcm 再截
+                    await asyncio.to_thread(pilk.decode, str(src), str(pcm), pcm_rate=24000)
+                    with open(pcm, "r+b") as fh:
+                        fh.truncate(VOICE_MAX_SECONDS * 24000 * 2)
+                else:
+                    proc = await asyncio.to_thread(
+                        subprocess.run,
+                        ["ffmpeg", "-y", "-i", str(src), "-t", str(VOICE_MAX_SECONDS),
+                         "-f", "s16le", "-ar", "24000", "-ac", "1", str(pcm)],
+                        capture_output=True, timeout=60,
+                    )
+                    if proc.returncode != 0:
+                        logger.warning("ffmpeg decode failed: %s", proc.stderr[-300:])
+                        return None, None
+                if pcm.stat().st_size >= VOICE_MAX_SECONDS * 24000 * 2:
+                    logger.info("[%s] 语音超过 %d 秒上限, 截掉尾巴发送",
+                                self.bot.appid, VOICE_MAX_SECONDS)
                 await asyncio.to_thread(
                     pilk.encode, str(pcm), str(silk), pcm_rate=24000, tencent=True
                 )
@@ -993,8 +1165,13 @@ class Sender:
 
         async with self._lock_for(chat_type, peer_openid):
             payloads: list[dict] = []
-            for group in group_items(items):
-                payloads.extend(self._group_to_payloads(group, chat_type))
+            # 卡片单独成条, 把前后的文字/图片隔成各自配对
+            for is_card, run in itertools.groupby(items, key=lambda i: i["kind"] == "card"):
+                if is_card:
+                    payloads.extend(self._card_payload(i, chat_type) for i in run)
+                    continue
+                for group in group_items(list(run)):
+                    payloads.extend(self._group_to_payloads(group, chat_type))
             if reference and payloads:
                 payloads[0]["message_reference"] = reference
 
@@ -1022,9 +1199,9 @@ class Sender:
                     size = self.bot.media.size_of_url(payload["_media"][1])
                     if size:
                         sizes.append(size)
-                # 首条记完整逻辑消息; 后续分片记本片实际内容, 不再存空 []
+                # 首条记完整逻辑消息; 后续分片记本片实际内容(卡片被拒就是改发的文字)
                 segments = (recorded if index == 0
-                            else self._payload_segments(payload))
+                            else self._payload_segments(payload.get("_fell_back", payload)))
                 mid = await self.bot.store.record_outgoing(
                     self.bot.appid, chat_type, peer_openid, peer_virtual,
                     self.bot.self_id, qq_id, segments,
@@ -1103,7 +1280,7 @@ class Sender:
         if _CMD_TAG_RE.search(body):
             return [payload]
         source, links = prepare_image_text(body)
-        png = await render_text_image(source)
+        png = await textimg.render_text_image(source)
         if not png:
             return [payload]
         token = self.bot.media.put_bytes(png, ".png")
@@ -1154,6 +1331,12 @@ class Sender:
     def _payload_segments(payload: dict) -> list[dict]:
         """物理消息 payload -> 可读的 OneBot 段(用于第 2+ 分片的落库)."""
         segments: list[dict] = []
+        if payload.get("msg_type") == 8:
+            content = (payload.get("card") or {}).get("content") or {}
+            return [{"type": "share", "data": {
+                "url": content.get("url", ""), "title": content.get("title", ""),
+                "content": content.get("description", ""),
+                "image": content.get("pic_url", "")}}]
         if payload.get("_media"):
             file_type, url, name = payload["_media"][:3]
             seg_type = {FILE_TYPE_IMAGE: "image", FILE_TYPE_VIDEO: "video",
@@ -1167,6 +1350,16 @@ class Sender:
         if text.strip():
             segments.append({"type": "text", "data": {"text": text}})
         return segments
+
+    def _card_payload(self, item: dict, chat_type: str) -> dict:
+        """卡片条目 -> msg_type=8; 卡片被拒时改发的文字一并备好(_card_fallback)."""
+        text = {"kind": "text", "plain": item["plain"], "md": item["md"], "has_at": False}
+        fallback = self._group_to_payloads(
+            {"text": text, "media": None, "text_first": True}, chat_type)
+        payload = {"msg_type": 8, "card": item["card"]}
+        if fallback:
+            payload["_card_fallback"] = fallback[0]
+        return payload
 
     def _group_to_payloads(self, group: dict, chat_type: str) -> list[dict]:
         """一个"文字+图片"分组 -> 1~2 个平台消息(markdown 与 media 不能共存).
@@ -1225,11 +1418,22 @@ class Sender:
     async def _send_one(
         self, chat_type: str, peer_openid: str, payload: dict,
         prefer_mid: int | None, cdn_urls: dict[str, str] | None = None,
+        slot=_ACQUIRE,
     ) -> tuple[str, str]:
-        """返回 (平台消息id, ref_idx); cdn_urls 传了就记下 托管 URL -> QQ CDN 地址."""
+        """返回 (平台消息id, ref_idx); cdn_urls 传了就记下 托管 URL -> QQ CDN 地址.
+
+        卡片被拒改发文字时在 payload 上记 _fell_back(落库按实际发出的记).
+        slot: 已拿到的被动回复名额(None = 主动); 默认现取.
+        """
         body = dict(payload)
         media_info = body.pop("_media", None)
         plain_fallback = body.pop("_plain_fallback", None)
+        card_fallback = body.pop("_card_fallback", None)
+        # 卡片带引用: 接口照样回 200, 客户端却只显示「请使用新版手机QQ进行查看」
+        # (2026-11-01 实测, 同一张卡片不带引用就正常). 后端传了 reply 也剥掉, 保证卡片能看;
+        # 卡片被拒改发文字时引用再挂回去
+        card_reference = (body.pop("message_reference", None)
+                          if body.get("msg_type") == 8 else None)
         if media_info is not None:
             file_type, url, file_name, token = media_info
             try:
@@ -1251,9 +1455,10 @@ class Sender:
                     cdn_urls[url] = shown
             # content 可与 media 共存; 没有文字时别塞空格, 否则图上多一行空文本
 
-        slot = await self.bot.store.acquire_reply_slot(
-            self.bot.appid, chat_type, peer_openid, prefer_mid=prefer_mid
-        )
+        if slot is _ACQUIRE:
+            slot = await self.bot.store.acquire_reply_slot(
+                self.bot.appid, chat_type, peer_openid, prefer_mid=prefer_mid
+            )
         proactive = slot is None          # 只有主动消息吃日配额
         if slot is not None:
             credential, seq, kind = slot
@@ -1266,8 +1471,22 @@ class Sender:
         try:
             resp = await self._post_at_all(chat_type, peer_openid, body)
         except QQApiError as exc:
+            if body.get("msg_type") == 8 and card_fallback is not None and (
+                exc.code in CARD_REJECT_CODES
+                or (exc.status == 400 and exc.code not in _SESSION_CODES)
+            ):
+                # 卡片被拒(多半是封面平台拉不到) -> 同一名额改发备好的链接文字
+                logger.info("[%s] card rejected (%s %s), 改发文字",
+                            self.bot.appid, exc.code, exc.message)
+                fallback = dict(card_fallback)
+                if card_reference:
+                    fallback["message_reference"] = card_reference
+                payload["_fell_back"] = fallback
+                return await self._send_one(chat_type, peer_openid, fallback,
+                                            prefer_mid, cdn_urls, slot=slot)
             if body.get("msg_type") == 2 and plain_fallback is not None and (
-                exc.code in MARKDOWN_REJECT_CODES or exc.status == 400
+                exc.code in MARKDOWN_REJECT_CODES
+                or (exc.status == 400 and exc.code not in _SESSION_CODES)
             ):
                 # markdown 被拒 -> 同一 msg_id/msg_seq 名额改发纯文本
                 logger.info("[%s] markdown rejected (%s), 降级纯文本",
@@ -1281,6 +1500,15 @@ class Sender:
                     if exc2.code in URL_BLOCK_CODES:
                         body["content"] = _defang_urls(body["content"])
                         resp = await self._post_message(chat_type, peer_openid, body)
+                    elif exc2.code in PASSIVE_EXPIRED_CODES and slot is not None:
+                        # 纯文本这次才暴露凭据不行: 作废后照纯文本重发(markdown 已经被拒过)
+                        await self.bot.store.revoke_reply_slot(self.bot.appid, slot)
+                        plain = {k: v for k, v in payload.items()
+                                 if k not in ("markdown", "_plain_fallback")}
+                        plain.update(msg_type=0, content=body["content"])
+                        payload["_fell_back"] = plain
+                        return await self._send_one(chat_type, peer_openid, plain,
+                                                    prefer_mid, cdn_urls)
                     else:
                         raise SendError(
                             1500 if exc2.status >= 500 else 1404,
@@ -1329,8 +1557,17 @@ class Sender:
             elif exc.code in MUTED_CODES:
                 self.bot.note_send_error("muted", exc.code, peer_openid)
                 raise SendError(1503, f"bot 已被禁言: {exc.message}") from exc
+            elif exc.code in PEER_REFUSED_CODES:
+                self.bot.note_send_error("peer_refused", exc.code, peer_openid)
+                raise SendError(1503, f"对方不收消息: {exc.code} {exc.message}") from exc
             elif exc.code in PASSIVE_EXPIRED_CODES:
                 self.bot.note_send_error("passive_expired", exc.code, peer_openid)
+                if slot is not None:
+                    # 凭据被拒(多是入群/开主动消息这类通知事件的 event_id: 无效或不能回复):
+                    # 作废它再发, 自动换下一个凭据或走主动; 每轮作废一个, 必然收敛
+                    await self.bot.store.revoke_reply_slot(self.bot.appid, slot)
+                    return await self._send_one(chat_type, peer_openid, payload,
+                                                prefer_mid, cdn_urls)
                 raise SendError(1503, f"被动回复窗口已过: {exc.message}") from exc
             elif exc.code in BAD_MESSAGE_CODES:
                 self.bot.note_send_error("bad_message", exc.code, peer_openid)
@@ -1360,7 +1597,7 @@ class Sender:
         try:
             resp = await self._post_message(chat_type, peer_openid, body)
         except QQApiError as exc:
-            if exc.code in _NOT_AT_ALL_CODES or exc.status >= 500:
+            if exc.code in _SESSION_CODES or exc.status >= 500:
                 raise
             self._at_all_day[peer_openid] = _beijing_day()
             logger.info("[%s] @全体 被拒(%s %s), 改为文本 %s", self.bot.appid,
@@ -1403,6 +1640,10 @@ class Sender:
 
 def _payload_text(payload: dict) -> str:
     """实际发出的文字; 引用 idx 对不上时靠它按内容找回(插件改写后与记录的原消息不同)."""
+    if payload.get("_fell_back") is not None:
+        return _payload_text(payload["_fell_back"])
+    if payload.get("msg_type") == 8:
+        return cards.quote_key(payload.get("card") or {})
     if payload.get("_plain_fallback") is not None:
         return str(payload["_plain_fallback"])
     if payload.get("msg_type") == 2:
@@ -1430,6 +1671,38 @@ _MUSIC_URL_TEMPLATES = {
 _CARD_LINK_RE = re.compile(
     r'"(?:jumpUrl|jump_url|qqdocurl|url|link|web_url|weburl|detail_url)"'
     r'\s*:\s*"(https?:[^"]{1,300})"')
+
+
+# json 卡片里能转成图文卡片的几种: meta 下的键 -> (标题, 简介, 跳转, 图) 取哪个字段.
+# 小程序(B 站分享等)的 detail_1.title 是小程序名, 内容标题在 desc
+_ARK_FIELDS = {
+    "detail_1": ("desc", "title", "qqdocurl", "preview"),
+    "news": ("title", "desc", "jumpUrl", "preview"),
+    "music": ("title", "desc", "jumpUrl", "preview"),
+}
+
+
+def _ark_card_fields(data: dict) -> tuple[str, str, str, str] | None:
+    """json 段(小程序/新闻/音乐 ark) -> (标题, 简介, 跳转, 图); 认不出返回 None."""
+    try:
+        ark = json.loads(str(data.get("data") or ""))
+    except ValueError:
+        return None
+    meta = ark.get("meta") if isinstance(ark, dict) else None
+    if not isinstance(meta, dict):
+        return None
+    for key, (title_key, desc_key, url_key, pic_key) in _ARK_FIELDS.items():
+        item = meta.get(key)
+        if not isinstance(item, dict):
+            continue
+        pic = str(item.get(pic_key) or "").strip()
+        # 签名版小程序的 preview 不带协议头
+        if pic and not pic.startswith(("http://", "https://", "//")):
+            pic = "https://" + pic
+        return (str(item.get(title_key) or item.get(desc_key) or ""),
+                str(item.get(desc_key) or "") if item.get(title_key) else "",
+                str(item.get(url_key) or "").strip(), pic)
+    return None
 
 
 def _extract_card_text(data: dict) -> tuple[str, str]:

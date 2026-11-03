@@ -20,7 +20,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from ..config import ServerConfig
-from ..core import cdnkeys, forwardpage
+from ..core import cards, cdnkeys, forwardpage
 from ..core.manager import BotManager
 from ..qq.webhook import build_router as build_webhook_router
 from .auth import AuthManager
@@ -99,14 +99,13 @@ def forward_only_hosts(config) -> set[str]:
 
     仅在插件开启、配了 public_base_url 且转发域名与之不同时生效, 否则它可能是唯一入口.
     """
-    from ..core.forwardpage import resolve_base  # noqa: PLC0415
     from ..plugin import registry  # noqa: PLC0415
 
     public = (urlsplit(str(getattr(config, "public_base_url", "") or "")).hostname or "").lower()
     plugin = registry.plugins.get("forward_page")
     if not public or plugin is None or not plugin.enabled:
         return set()
-    base, _ = resolve_base(plugin.config.get("base_url"), config)
+    base, _ = forwardpage.page_base(config)
     host = (urlsplit(base).hostname or "").lower()
     return {host} if host and host != public else set()
 
@@ -167,6 +166,16 @@ def build_public_app(manager: BotManager,
             headers["Vary"] = "Accept-Encoding"
         return Response(body, status_code=status, headers=headers,
                         media_type="text/html; charset=utf-8")
+
+    @app.get(cards.COVER_PATH + "{name}")
+    async def card_cover(name: str):
+        """图文卡片的封面: 平台发送时来拉一次转存. 只认 card-*.jpg, 媒体库别的文件不外露."""
+        path = manager.media.resolve(name) if cards.COVER_NAME_RE.fullmatch(name) else None
+        if path is None:
+            return Response(status_code=404)
+        return FileResponse(path, media_type="image/jpeg",
+                            headers={"X-Content-Type-Options": "nosniff",
+                                     "Cache-Control": "public, max-age=3600"})
 
     @app.get("/f/{token}")
     async def forward_page(token: str, request: Request):

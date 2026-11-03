@@ -42,7 +42,7 @@ from .passthrough import Passthrough
 from .quota import QuotaTracker
 from .sender import Sender
 from .unparsed import UnparsedLog, files as unparsed_files
-from . import cdnkeys
+from . import cards, cdnkeys
 from .uploader import MediaUploader
 
 # rkey 落盘节流(所有 bot 共用一份 rkey, 见 cdnkeys)
@@ -1264,8 +1264,9 @@ class BotInstance:
             " ORDER BY mid DESC LIMIT 60",
             (self.appid, chat_type, peer_openid, int(time.time()) - 1800),
         )
-        # 引用 markdown 消息时平台可能给原文: 链接写回纯文本发送时的「文字 网址」
-        texts = {text, _MD_LINK_RE.sub(r"\1 \2", text)} - {""}
+        # 引用 markdown 消息时平台可能给原文: 链接写回纯文本发送时的「文字 网址」;
+        # 引用图文卡片给的是渲染文本, 还原成发送时记的 标题+简介
+        texts = {text, _MD_LINK_RE.sub(r"\1 \2", text), cards.key_from_quote(text)} - {""}
         hits: dict[str, list[int]] = {"out": [], "in": []}
         for row in rows:
             if out_only and row["direction"] != "out":

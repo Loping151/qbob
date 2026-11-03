@@ -45,6 +45,17 @@ def resolve_base(own: str, config=None) -> tuple[str, str]:
             return value.rstrip("/"), key
     return "", ""
 
+
+def page_base(config=None) -> tuple[str, str]:
+    """本服务转发网页(和卡片封面)对外的根地址与来源, 插件「合并转发转网页」的设置优先.
+
+    插件注册表在函数里才导入: 外部项目 import 本模块只为渲染, 不碰插件.
+    """
+    from ..plugin import registry  # noqa: PLC0415
+    registry.ensure_loaded()
+    plugin = registry.plugins.get("forward_page")
+    return resolve_base(plugin.config.get("base_url") if plugin else "", config)
+
 _MEDIA_TYPES = ("image", "mface", "video", "record", "file")
 _KIND_LABEL = {"image": "图片", "mface": "表情", "video": "视频",
                "record": "语音", "file": "文件"}

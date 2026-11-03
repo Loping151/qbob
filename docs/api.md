@@ -49,7 +49,7 @@
 | 1404 | 目标不存在、平台无此能力(「无法实现」), 或平台返回的其它 4xx 错误 |
 | 1500 | 平台或本服务内部错误, 可重试 |
 | 1502 | 频控或平台暂时故障, 稍后重试 |
-| 1503 | 该群未开主动消息/全量消息、被禁言、被动回复窗口已过等 |
+| 1503 | 该群未开主动消息/全量消息、被禁言、被动回复窗口已过、私聊对方非好友或拒收等 |
 
 ### 事件
 
@@ -105,6 +105,47 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 
 参数 `group_id`, 返回 `group_id`、`platform`、`group_name`、`member_count`、`openid`、`appid`。
 
+## 图文卡片
+
+QQ 的图文卡片: 标题 + 简介 + 一张封面, 点卡片打开链接。用标准的 `share` 段发, `image` 扩展成可以传多种形式:
+
+```json
+{"type": "share", "data": {
+  "url": "https://example.com/post",
+  "title": "标题",
+  "content": "简介",
+  "image": "https://example.com/cover.jpg"
+}}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `url` | ✅ | 点卡片打开的地址, 必须 https |
+| `title` | | 超过 50 字截断; 留空写「链接」(`music` 写「音乐」) |
+| `content` | | 简介, 超过 200 字截断; 换行在卡片上显示不出来, 会换成空格; 留空写 `url` 的域名 |
+| `image` | ✅ | 封面。`http(s)://` 外链原样交给平台; `base64://`、`file://`、本机绝对路径由本服务处理(动图取首帧, 长图只取顶部, 高宽比夹在 1:2 ~ 4:3)后: 群聊上传给 QQ 用 CDN 直链(需要近 45 分钟内收到过群图); 否则经公网地址给平台下载, 要配好网页地址(插件「合并转发转网页」的网页地址, 或 `forward_base_url` / `public_base_url`) |
+
+也会发成卡片的:
+
+- `music`(`type: custom`): `url` 跳转、`title`、`content`(歌手)、`image` 封面, 规则同上; `audio` 用不上。
+  只给 id 的平台音乐(`type` 为 `163` / `qq`)没有封面, 发链接。
+- `json` 卡片: 小程序取 `meta.detail_1`(标题 `desc`、简介是小程序名 `title`、跳转 `qqdocurl`、封面 `preview`),
+  新闻 / 音乐取 `meta.news` / `meta.music` 的 `title`、`desc`、`jumpUrl`、`preview`。
+- 群聊合并转发: 标题「聊天记录」, 简介是条数与图片数, 封面取第一张图, 没有图就把前几条文字渲染成图;
+  点开经腾讯文档的外链跳转页(docs.qq.com/scenario/link.html?url=…)到本服务的网页(插件「合并转发转网页」的「使用腾讯文档跳转」, 默认开)。
+
+发不成卡片(跳转不是 https、没有封面、本地图既传不了 QQ 又没配公网地址)时发「标题 + 链接」;
+平台拒收(封面拉不到等)时自动改发同样的文字, 落库与引用回查都按实际发出的算。
+
+平台限制(实测):
+
+- 卡片单独成一条消息, 同一条 OneBot 消息里的其它文字、图片拆到前后各自发。
+- 卡片不能带引用: 带了客户端只显示「请使用新版手机QQ进行查看」。`reply` 照常挂在第一条消息上, 第一条是卡片时丢掉引用。
+- 封面由平台在发送时下载一次, 超时很短: 对方拦爬虫(如回 429)、或经内网穿透太慢, 就发不成卡片, 退回文字。
+- 点卡片打开的地址后面会被 QQ 加上 `?qq_aio_chat_type=N`。卡片跳到一般网站时, QQ 内置浏览器可能只显示
+  「如需浏览，请使用浏览器访问」, 要复制到浏览器; 同一网址发成链接则提示「无法确认该网页的安全性」, 点继续可打开。
+  聊天记录卡片默认经腾讯文档的外链跳转页 `https://docs.qq.com/scenario/link.html?url=<编码后的网址>` 打开, 可在 QQ 内直接浏览。
+
 ## 支持矩阵
 
 平台能力有限, 能做的直接做, 做不到但能用消息顶上的**降级**实现, 做不到的标**无法实现**:
@@ -116,7 +157,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 | 动作 | 支持 | 说明 |
 |---|---|---|
 | `send_msg` / `send_group_msg` / `send_private_msg` | ✅ | 见下方消息段; 被动回复/主动消息自动选择 |
-| `send_group_forward_msg` / `send_private_forward_msg` / `send_forward_msg` | 降级 | 群聊转为一页网页链接(插件「合并转发转网页」); 私聊、插件关闭、没有可用网页地址、或不含媒体的兑换码类内容时逐条发送 |
+| `send_group_forward_msg` / `send_private_forward_msg` / `send_forward_msg` | 降级 | 群聊转为一页网页, 群里发一张「聊天记录」卡片, 经腾讯文档跳转打开(插件「合并转发转网页」; 关掉跳转则默认发链接)。私聊、插件关闭、没有可用网页地址、或不含媒体的兑换码类内容时逐条发送 |
 | `delete_msg` | ✅ | 撤回; 一条消息被拆成多条时整批撤。bot 非群管时仅 2 分钟内 |
 | `get_msg` / `get_forward_msg` | ✅ | 读本地记录(默认保留 7 天) |
 | `get_group_msg_history` / `get_friend_msg_history` | ✅ | 同上 |
@@ -158,7 +199,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 | `at`(全体) | 降级 | bot 是群管且开 Markdown 时真 @全体, 平台限每群每天 1 次(北京时间); 用过、非群管或被拒时为「@全体成员」文本 |
 | `face` | 降级 | 对应 emoji, 没有则 `[表情名]` |
 | `poke` | 降级 | 「@对方 戳了戳你」 |
-| `music` / `share` / `json` / `xml` | 降级 | 标题 + 链接 |
+| `share` / `music`(自定义) / `json`(小程序、新闻、音乐卡片) | 降级 | 有 https 跳转和封面时发[图文卡片](#图文卡片), 否则标题 + 链接 |
+| `music`(平台 id) / `xml` | 降级 | 标题 + 链接 |
 | `node` / `forward` | 降级 | 同转发动作 |
 | markdown 图片 `![](url)` | 降级 | 抽出来当原生图片发 |
 

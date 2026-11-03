@@ -33,7 +33,7 @@ BUILTIN_DIR = PLUGIN_ROOT / "built-in"
 HOOK_POINTS = {
     "message_out": ("pipe", "发送前的整条 OneBot 消息(段列表) -> 新段列表"),
     "text_out": ("pipe", "单个文本段 -> 它的 markdown 版本(纯文本版不变)"),
-    "forward_out": ("first", "合并转发节点(群聊和私聊) -> (纯文本, markdown) 代替逐条摊平"),
+    "forward_out": ("first", "合并转发节点(群聊和私聊) -> (纯文本, markdown) 或 {card, plain, md}(card 为 None 发文字) 代替逐条摊平"),
     "payload_out": ("first", "单条平台消息体 -> 拆/换成若干条消息体"),
     "event_in": ("pipe", "下发给 OneBot 后端前的消息事件 -> 新事件, False 丢弃"),
 }
@@ -332,7 +332,9 @@ _RESULT_OK = {
     "message_out": lambda r: isinstance(r, list) and all(isinstance(x, dict) for x in r),
     "text_out": lambda r: isinstance(r, str),
     "forward_out": lambda r: isinstance(r, str) or (
-        isinstance(r, tuple) and len(r) == 2 and all(isinstance(x, str) for x in r)),
+        isinstance(r, tuple) and len(r) == 2 and all(isinstance(x, str) for x in r)) or (
+        isinstance(r, dict) and isinstance(r.get("card"), (dict, type(None)))
+        and isinstance(r.get("plain"), str) and isinstance(r.get("md"), (str, type(None)))),
     "payload_out": lambda r: isinstance(r, list) and all(isinstance(x, dict) for x in r),
     "event_in": lambda r: r is False or isinstance(r, dict),
 }

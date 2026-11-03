@@ -225,6 +225,15 @@ class MessageStore:
              ts, ts + window, budget),
         )
 
+    async def revoke_reply_slot(self, bot_appid: str, slot: tuple) -> None:
+        """平台拒了这个被动凭据(过期/无效/该事件不能回复): 作废, 之后不再选它."""
+        credential, _, kind = slot
+        sql = ("UPDATE passive_events SET expire=0 WHERE bot_appid=? AND event_id=?"
+               if kind == "event" else
+               "UPDATE messages SET passive_expire=0 WHERE bot_appid=? AND qq_msg_id=?")
+        async with self._lock:
+            await self.db.execute(sql, (bot_appid, credential))
+
     async def acquire_reply_slot(
         self,
         bot_appid: str,

@@ -62,7 +62,7 @@ async def add_signature(ctx, message):
 |---|---|---|---|
 | `message_out` | `message`: 要发的整条 OneBot 消息(段列表, 已规范化) | 新的段列表 | 依次改写 |
 | `text_out` | `text`: 单个文本段的内容 | 它的 markdown 版本(纯文本版不变) | 依次改写 |
-| `forward_out` | `nodes`: 群聊合并转发的节点列表 | `(纯文本, markdown)` 或一个字符串, 用它代替整份转发 | 第一个接手的算 |
+| `forward_out` | `nodes`: 群聊合并转发的节点列表 | `(纯文本, markdown)` 或一个字符串, 用它代替整份转发; 也可以是图文卡片 `{"card": {...}, "plain": ..., "md": ...}`(`card` 即平台请求体的 card 字段, 见 `core/cards.py`; 卡片被拒时改发 plain/md) | 第一个接手的算 |
 | `payload_out` | `payload`: 一条平台消息体(`msg_type`/`content`/`markdown`…) | 若干条消息体的列表 | 第一个接手的算 |
 | `event_in` | `event`: 要下发给 OneBot 后端的消息事件 | 新事件; `False` = 不下发 | 依次改写 |
 
