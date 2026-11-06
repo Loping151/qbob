@@ -57,6 +57,8 @@
 
 - 群消息事件总是带一个 `at` bot 的段在前(nonebot 据此判断 `to_me`); 引用消息时 `reply` 段在最前。
 - bot 自己发的消息也会作为普通 `message` 事件下发一份(`user_id` = `self_id`), 每 bot 可关。
+  发送时给的 `base64://`、本地文件在这份事件里(以及 `get_msg`)换成 QQ CDN 直链、平台签名链接或
+  `media://` 引用(可原样再发), 合并转发节点里的也一样, 不回传原始 base64。
 - 按钮点击: `notice_type = "qqbot_interaction"`, 字段 `interaction_id`、`data`(平台原样)、
   `chat_type`、`scene`、`group_id`、`user_id`。本服务已替你回执平台。
 

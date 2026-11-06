@@ -422,9 +422,11 @@ _MEDIA_SEG_TYPES = ("image", "mface", "record", "video", "file")
 
 
 def _swap_media_urls(segments: list[dict], file_urls: dict[str, str]) -> list[dict]:
-    """落库前把媒体段的 file 换成本地媒体引用(公网 URL 或 media://).
+    """落库与自身消息回报前把媒体段的 file 换成本地媒体引用(公网 URL 或 media://).
 
-    base64 直接落库会被 sanitize_segments 截断, get_msg / 引用回查就读不回图.
+    base64 直接落库会被 sanitize_segments 截断, get_msg / 引用回查就读不回图; 回报带整包
+    base64 一条就能上十几 MB, 超过后端 ws 的单帧上限会被断线. 没对上的由 _stash_inline_media 兜底.
+    file_urls 里记成空串的(base64 坏了)也照换, 不带出去.
     """
     if not file_urls:
         return segments
@@ -433,24 +435,104 @@ def _swap_media_urls(segments: list[dict], file_urls: dict[str, str]) -> list[di
         if not isinstance(seg, dict):
             out.append(seg)
             continue
+        kind = seg.get("type")
         data = dict(seg.get("data") or {})
-        if seg.get("type") in _MEDIA_SEG_TYPES:
-            url = file_urls.get(str(data.get("file") or data.get("url") or ""))
-            if url:
+        new = {**seg, "data": data}
+        if kind in _MEDIA_SEG_TYPES:
+            url = _mapped(file_urls, data.get("file"), data.get("url"))
+            if url is not None:
                 data["file"] = url
                 data["url"] = url
-        elif seg.get("type") in ("share", "music"):
+        elif kind in ("share", "music"):
             # 卡片封面: base64 换成给平台的地址
-            url = file_urls.get(str(data.get("image") or ""))
-            if url:
+            url = _mapped(file_urls, data.get("image"))
+            if url is not None:
                 data["image"] = url
-        elif isinstance(data.get("content"), (list, dict)):
-            # node 的媒体在 data.content 里(单个 dict 补成数组)
-            content = data["content"]
-            data["content"] = _swap_media_urls(
-                content if isinstance(content, list) else [content], file_urls)
-        out.append({**seg, "data": data})
+        else:
+            for key, nested in _nested_messages(seg, data):
+                swapped = _swap_media_urls(nested, file_urls)
+                if key == "seg.message":
+                    new["message"] = swapped
+                else:
+                    data[key] = swapped
+        out.append(new)
     return out
+
+
+def _mapped(file_urls: dict[str, str], *values) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value in file_urls:
+            return file_urls[value]
+    return None
+
+
+def _nested_messages(seg: dict, data: dict) -> list[tuple[str, list]]:
+    """段里嵌着的消息: node 的 data.content / data.message(单个 dict 补成数组),
+    以及入库形节点(无 type, 顶层 sender + message, 只出现在 node 内层)."""
+    found = []
+    for key in ("content", "message"):
+        value = data.get(key)
+        if isinstance(value, (list, dict)):
+            found.append((key, value if isinstance(value, list) else [value]))
+    if seg.get("type") is None and isinstance(seg.get("message"), list):
+        found.append(("seg.message", seg["message"]))
+    return found
+
+
+def _inline_media(segments: list) -> list[str]:
+    """消息里所有 base64:// 媒体值(含 node 内层、卡片封面), 口径同 _swap_media_urls."""
+    found: list[str] = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        kind = seg.get("type")
+        data = seg.get("data") if isinstance(seg.get("data"), dict) else {}
+        if kind in _MEDIA_SEG_TYPES:
+            values = [data.get("file"), data.get("url")]
+        elif kind in ("share", "music"):
+            values = [data.get("image")]
+        else:
+            values = []
+            for _, nested in _nested_messages(seg, data):
+                found.extend(_inline_media(nested))
+        found.extend(v for v in values if isinstance(v, str) and v.startswith("base64://"))
+    return found
+
+
+def _page_address(data: dict, now: float) -> str:
+    """建页后的媒体段 -> 落库与回报给的地址: CDN 直链补新鲜 rkey; 没 rkey 用还没过期的
+    raw_url; 都没有给不带 rkey 的直链(网页/管理台读的时候补 rkey). 没有地址返回空串."""
+    url = str(data.get("url") or "")
+    if cdnkeys.is_cdn(url):
+        rkey = cdnkeys.fresh(now).get(cdnkeys.appid_of(url))
+        if rkey:
+            return cdnkeys.with_rkey(url, rkey)
+    raw_url = str(data.get("raw_url") or "")
+    if raw_url and int(data.get("raw_until") or 0) > now:
+        return raw_url
+    return url if url.startswith(("http://", "https://")) else ""
+
+
+def _note_page_media(before: list, after: list, file_urls: dict[str, str],
+                     now: float) -> None:
+    """建页前后的节点段逐个对上(_upload_for_page 保序保形): 原始 base64 / 本地文件 ->
+    建页换来的地址, 落库与回报用(见 _swap_media_urls)."""
+    if not isinstance(before, list) or not isinstance(after, list):
+        return
+    for old, new in zip(before, after):
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            continue
+        old_data = old.get("data") if isinstance(old.get("data"), dict) else {}
+        new_data = new.get("data") if isinstance(new.get("data"), dict) else {}
+        if old.get("type") in _MEDIA_SEG_TYPES:
+            for raw in (old_data.get("file"), old_data.get("url")):
+                if not raw or not isinstance(raw, str) or raw.startswith(("http://", "https://")):
+                    continue
+                url = _page_address(new_data, now)
+                if url:
+                    file_urls[raw] = url
+        else:
+            _note_page_media(old_data.get("content"), new_data.get("content"), file_urls, now)
 
 
 def describe_inbound(message, plan: "MessagePlan") -> str:
@@ -910,13 +992,22 @@ class Sender:
             node["avatar"] = self._avatar_of(node.pop("uid", 0))
         # token 按上传前的内容算: 同一份转发再发时页面已在, 不再上传
         token = forwardpage.page_token(self.bot.appid, nodes)
-        exists = await self.bot.db.fetchone(
-            "SELECT 1 FROM forward_pages WHERE token=?", (token,))
-        if exists is None:
+        before = [node["segments"] for node in nodes]
+        row = await self.bot.db.fetchone(
+            "SELECT nodes FROM forward_pages WHERE token=?", (token,))
+        if row is not None:
+            # 页面已在: 原始值 -> 地址按存下的节点对回, 落库与回报跟第一次发一样
+            try:
+                stored = json.loads(row["nodes"])
+            except ValueError:
+                stored = []
+            after = [node.get("segments") if isinstance(node, dict) else None
+                     for node in (stored if isinstance(stored, list) else [])]
+        else:
             # 所有节点一起传, 并发由信号量卡
             sem = asyncio.Semaphore(PAGE_UPLOAD_CONCURRENCY)
             uploaded = await asyncio.gather(*(
-                self._upload_for_page(node["segments"], plan, peer_openid, sem)
+                self._upload_for_page(node["segments"], peer_openid, sem)
                 for node in nodes), return_exceptions=True)
             failed = [u for u in uploaded if isinstance(u, BaseException)]
             if failed:
@@ -931,6 +1022,7 @@ class Sender:
                 raise SendError(1500, f"转发网页媒体上传失败: {exc}") from exc
             for node, segments in zip(nodes, uploaded):
                 node["segments"] = segments
+            after = list(uploaded)
             # OR IGNORE: ts 停在第一次(直链可用窗口按它算, 不能刷新)
             await self.bot.db.execute(
                 "INSERT OR IGNORE INTO forward_pages (token, bot_appid, nodes, ts)"
@@ -938,6 +1030,9 @@ class Sender:
                 (token, self.bot.appid, json.dumps(nodes, ensure_ascii=False),
                  int(time.time())),
             )
+        now = time.time()
+        for old, new in zip(before, after):
+            _note_page_media(old, new, plan.file_urls, now)
         return f"{base.rstrip('/')}/f/{token}"
 
     def _avatar_of(self, virtual_id: int) -> str:
@@ -972,30 +1067,29 @@ class Sender:
             return str(other.cfg.get("name") or "") if other else ""
         return str(entry.nickname or "")
 
-    async def _upload_for_page(self, segments: list[dict], plan: MessagePlan,
-                               group_openid: str,
+    async def _upload_for_page(self, segments: list[dict], group_openid: str,
                                sem: asyncio.Semaphore) -> list[dict]:
         """节点里的媒体 -> QQ CDN 地址, 不托管媒体字节(见 forwardpage).
 
         - QQ 直链 / 外站链接: 原样(渲染时给 QQ 直链换新 rkey);
         - 本地/base64: 上传给平台(不发出去), 用 file_uuid 拼直链, raw_url(1 小时)兜底;
         - 语音(平台转 silk, 浏览器放不了)只留 raw_url; 文件只留名字. 失败直接抛.
+        保序保形(只换段内 data), 落库与回报靠前后对位找地址(_note_page_media).
         """
         async def one(seg: dict) -> dict:
             data = dict(seg.get("data") or {})
             kind = seg.get("type")
             if kind in _MEDIA_SEG_TYPES:
                 async with sem:
-                    await self._page_media(kind, data, plan, group_openid)
+                    await self._page_media(kind, data, group_openid)
             elif isinstance(data.get("content"), list):
                 data["content"] = await self._upload_for_page(
-                    data["content"], plan, group_openid, sem)
+                    data["content"], group_openid, sem)
             return {**seg, "data": data}
 
         return list(await asyncio.gather(*(one(s) for s in segments)))
 
-    async def _page_media(self, kind: str, data: dict, plan: MessagePlan,
-                          group_openid: str) -> None:
+    async def _page_media(self, kind: str, data: dict, group_openid: str) -> None:
         raw = str(data.get("url") or data.get("file") or "")
         media = self.bot.media
         if raw.startswith(("http://", "https://")):
@@ -1019,11 +1113,6 @@ class Sender:
             data["raw_until"] = done["raw_until"]
         if blob.startswith(b"GIF8") and not data.get("name"):
             data["name"] = "image.gif"          # 页面对 .gif 不取 spec 变体(会压成单帧)
-        # 落库记录也换成这个地址(见 _swap_media_urls)
-        rkey = cdnkeys.fresh().get(appid or "")
-        shown = cdnkeys.with_rkey(data["url"], rkey) if data["url"] and rkey else ""
-        if shown or data.get("raw_url"):
-            plan.file_urls[raw] = shown or data["raw_url"]
 
     async def _plan_forward_node(self, plan: MessagePlan, data: dict, chat_type: str) -> None:
         """合并转发节点 -> 逐行正文(不带发送者名); 节点内媒体全部照发."""
@@ -1046,6 +1135,8 @@ class Sender:
             if item["kind"] == "media":
                 plan.add_media(item["file_type"], item["url"],
                                item.get("name", ""), token=item.get("token"))
+        # 节点内 base64 -> 媒体引用也要带回去, 落库与回报才不带整包(见 _swap_media_urls)
+        plan.file_urls.update(sub_plan.file_urls)
 
     async def _prepare_voice(self, file_field: str) -> tuple[str | None, str | None]:
         """音频落本地并转 silk -> (引用 URL, 本地 token); 超过平台时长上限的截掉尾巴."""
@@ -1162,6 +1253,7 @@ class Sender:
             for url in urls:
                 items.append({"kind": "media", "file_type": FILE_TYPE_IMAGE,
                               "url": url})
+        await self._stash_inline_media(normalize_message(message), plan.file_urls)
 
         async with self._lock_for(chat_type, peer_openid):
             payloads: list[dict] = []
@@ -1231,6 +1323,22 @@ class Sender:
             await self._report_self(chat_type, peer_openid, peer_virtual,
                                     first_mid, recorded)
             return first_mid
+
+    async def _stash_inline_media(self, segments: list[dict],
+                                  file_urls: dict[str, str]) -> None:
+        """兜底: 还没有对应地址的 base64 媒体存进媒体库, 落库与自身消息回报改带 media:// 引用.
+
+        正常路径(_plan_segment、建页、卡片封面)都会记进 file_urls, 走到这里说明有漏, 记日志;
+        解不开的 base64 记空串, 照样不带出去.
+        """
+        missed = list(dict.fromkeys(
+            raw for raw in _inline_media(segments) if raw not in file_urls))
+        for raw in missed:
+            url, _ = await asyncio.to_thread(self.bot.media.ingest_file_field, raw)
+            file_urls[raw] = url or ""
+        if missed:
+            logger.info("[%s] %d 个 base64 媒体没对上地址, 落库与回报改用媒体库引用",
+                        self.bot.appid, len(missed))
 
     async def _report_self(self, chat_type: str, peer_openid: str,
                            peer_virtual: int, mid: int,
