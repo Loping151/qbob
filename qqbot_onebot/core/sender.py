@@ -73,17 +73,23 @@ URL_BLOCK_CODES = {40054010, 304003, 40034104}       # 后两个表外
 RATE_LIMIT_CODES = {40034100, 11244, 22009}
 # 主动消息无权限: 要复查群状态
 PROACTIVE_DENIED_CODES = {40034105}
-# 被动凭据过期/无效/该事件不支持回复: 换主动或等下条消息
+# 被动凭据过期/无效/该事件不支持回复: 换主动或等下条消息. 40034031 msgid已经过期 表外
 PASSIVE_EXPIRED_CODES = {40034128, 40034005, 304103,
-                         40034024, 40034025, 40034026, 40034027}
-# bot 在该群已无资格说话: 不重试, 但复查群状态
-NOT_IN_GROUP_CODES = {40054003, 40034101}
+                         40034024, 40034025, 40034026, 40034027, 40034031}
+# bot 在该群已无资格说话: 不重试, 复查群状态(确认不在群即自动禁用).
+# 11293 机器人非群成员 / 11255 无效群 openid 表外, 发送与上传都会报
+NOT_IN_GROUP_CODES = {40054003, 40034101, 11293, 11255}
 MUTED_CODES = {40054002}
 # 私聊: 不是好友 / 用户拒收. 私聊没有状态接口可复查, 不重试
 PEER_REFUSED_CODES = {40054004, 40054013}
-# 瞬时故障 / bot 短暂离线. 50055002/40054006/340067 是单聊表的
+# 瞬时故障 / bot 短暂离线. 50055002/40054006/340067 是单聊表的; 50035006 表外(HTTP 500
+# 「消息发送异常，请稍后重试」)
 TRANSIENT_CODES = {50055001, 50055006, 40034004, 40054016,
-                   50055002, 40054006, 340067}
+                   50055002, 40054006, 340067, 50035006}
+# 瞬时故障框架内重试(全局选项 retry_transient): 各次重试前的等待秒数.
+# 被动回复沿用同一 msg_id/msg_seq, 前一次其实已送达时平台按 msg_seq 去重, 不会发两条
+TRANSIENT_RETRY_DELAYS = (1.0, 3.0)
+DEDUP_CODE = 40054005           # 消息被去重, 请检查请求 msgseq
 # 消息本身有问题: 不复查也不重试. 后一行是单聊表的(召回/订阅按钮/输入中状态本服务不用)
 BAD_MESSAGE_CODES = {304061, 340069, 305007, 304064, 304080,
                      40054007, 40054005, 40034006, 40034029,
@@ -1526,12 +1532,13 @@ class Sender:
     async def _send_one(
         self, chat_type: str, peer_openid: str, payload: dict,
         prefer_mid: int | None, cdn_urls: dict[str, str] | None = None,
-        slot=_ACQUIRE,
+        slot=_ACQUIRE, retry: int = 0,
     ) -> tuple[str, str]:
         """返回 (平台消息id, ref_idx); cdn_urls 传了就记下 托管 URL -> QQ CDN 地址.
 
         卡片被拒改发文字时在 payload 上记 _fell_back(落库按实际发出的记).
         slot: 已拿到的被动回复名额(None = 主动); 默认现取.
+        retry: 瞬时故障已重试的次数.
         """
         body = dict(payload)
         media_info = body.pop("_media", None)
@@ -1549,6 +1556,9 @@ class Sender:
                     chat_type, peer_openid, file_type, url, file_name, token
                 )
             except QQApiError as exc:
+                if exc.code in NOT_IN_GROUP_CODES:
+                    # 上传先于发送撞到「bot 不在群」: 与发送同一处理, 别回 1500 让后端以为媒体被拒
+                    raise self._not_in_group(chat_type, peer_openid, exc) from exc
                 if file_type == FILE_TYPE_FILE:
                     # 文件上传被拒 -> 文本兜底; 本地引用只报名字
                     shown = url if url.startswith(("http://", "https://")) else ""
@@ -1652,16 +1662,27 @@ class Sender:
                 )
                 raise SendError(1503, f"主动消息无权限: {exc.message}") from exc
             elif exc.code in TRANSIENT_CODES:
-                # 给可重试的 retcode
                 self.bot.note_send_error("transient", exc.code, peer_openid)
+                if (retry < len(TRANSIENT_RETRY_DELAYS)
+                        and self._option("retry_transient", True)):
+                    # 框架内重试: 同一名额(同 msg_id/msg_seq)再发
+                    delay = TRANSIENT_RETRY_DELAYS[retry]
+                    logger.warning("[%s] 平台暂时性故障 %s %s, %.0fs 后重试 %d/%d",
+                                   self.bot.appid, exc.code, exc.message, delay,
+                                   retry + 1, len(TRANSIENT_RETRY_DELAYS))
+                    await asyncio.sleep(delay)
+                    return await self._send_one(chat_type, peer_openid, payload,
+                                                prefer_mid, cdn_urls, slot=slot,
+                                                retry=retry + 1)
+                # 给可重试的 retcode
                 raise SendError(1502, f"平台暂时性故障: {exc.code} {exc.message}") from exc
             elif exc.code in NOT_IN_GROUP_CODES:
-                # 被踢/退群: 复查以作废群状态
-                self.bot.note_send_error("not_in_group", exc.code, peer_openid)
-                asyncio.create_task(
-                    self.bot.refresh_peer_state(chat_type, peer_openid, "not-member")
-                )
-                raise SendError(1404, f"bot 不在该群: {exc.code} {exc.message}") from exc
+                raise self._not_in_group(chat_type, peer_openid, exc) from exc
+            elif exc.code == DEDUP_CODE and retry and slot is not None:
+                # 重试前那次其实已送达, 平台按 msg_seq 去重: 算发出, 只是拿不到消息 id
+                logger.info("[%s] 重试被去重, 前一次已送达", self.bot.appid)
+                self.bot.note_sent(chat_type, peer_openid, proactive)
+                return f"unknown-{int(time.time())}", ""
             elif exc.code in MUTED_CODES:
                 self.bot.note_send_error("muted", exc.code, peer_openid)
                 raise SendError(1503, f"bot 已被禁言: {exc.message}") from exc
@@ -1691,6 +1712,14 @@ class Sender:
                     or f"unknown-{int(time.time())}")
         ref_idx = str((resp.get("ext_info") or {}).get("ref_idx", ""))
         return qq_id, ref_idx
+
+    def _not_in_group(self, chat_type: str, peer_openid: str,
+                      exc: QQApiError) -> SendError:
+        """被踢/退群: 后台复查群状态(确认不在群就作废并自动禁用), 回 1404."""
+        self.bot.note_send_error("not_in_group", exc.code, peer_openid)
+        asyncio.create_task(
+            self.bot.refresh_peer_state(chat_type, peer_openid, "not-member"))
+        return SendError(1404, f"bot 不在该群: {exc.code} {exc.message}")
 
     async def _post_at_all(self, chat_type: str, peer_openid: str, body: dict) -> dict:
         """带 @全体 标签的消息: 发出去就记下今天已用; 被拒换成文本 @全体成员 再发一次.

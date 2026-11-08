@@ -539,6 +539,21 @@ class BotInstance:
         # 锁也回收, 否则反复进出群会泄漏
         self._state_locks.pop(group_openid, None)
 
+    async def _auto_disable_group(self, group_openid: str, why: str) -> None:
+        """平台确认 bot 已不在群: 同「禁用」指令 —— 白名单模式移出白名单, 黑名单模式加进黑名单.
+        重新拉进群后要 su 再「启用」."""
+        if self.cfg.get("group_list_mode", "white") == "black":
+            entry = self.idmap.lookup_openid(self.appid, "group", group_openid)
+            changed = await self.access.add(
+                self.appid, "group", "black", group_openid,
+                virtual_id=entry.virtual_id if entry else 0,
+                note=f"自动禁用: {why}", added_by="system")
+        else:
+            changed = await self.access.remove(self.appid, "group", "white", group_openid)
+        if changed:
+            logger.warning("[%s] 群 %s… 已自动禁用: %s",
+                           self.appid, group_openid[:12], why)
+
     def _state_lock(self, openid: str) -> asyncio.Lock:
         if openid not in self._state_locks:
             self._state_locks[openid] = asyncio.Lock()
@@ -621,11 +636,14 @@ class BotInstance:
                 data = await self.api.group_bot_state(group_openid)
             except Exception as exc:
                 if isinstance(exc, QQApiError) and exc.code in GROUP_GONE_CODES:
-                    # bot 已不在群(DEL_ROBOT 事件丢了): 与退群同一处理
+                    # bot 已不在群(DEL_ROBOT 事件丢了): 作废状态并自动禁用,
+                    # 下游再往这个群发会在出站名单处直接拦下, 不再打平台
                     logger.info("[%s] bot_state(%s…) %s: %s(%s), 作废该群状态",
                                 self.appid, group_openid[:12], reason,
                                 exc.message, exc.code)
                     await self._forget_group(group_openid)
+                    await self._auto_disable_group(
+                        group_openid, f"{exc.message}({exc.code})")
                     return PeerState()
                 return await self._state_query_failed(
                     key, group_openid, state, now, reason, exc)

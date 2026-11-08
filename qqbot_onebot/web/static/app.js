@@ -2564,6 +2564,8 @@ async function renderOptions(main) {
         <h3>发送</h3>
         ${check("recall_hint", "转发摊平成多条时附一句「可回复本消息一次性撤回」",
           "只影响这句提示发不发；没发提示就没有一次性撤回的入口")}
+        ${check("retry_transient", "平台临时故障时自动重试",
+          "平台回「请稍后重试」类错误时框架内再发 2 次（间隔 1 秒、3 秒），仍失败才报错给后端")}
       </section>
     </form>`;
   if (ro) return;
@@ -2574,6 +2576,7 @@ async function renderOptions(main) {
       require_recv_all: form.require_recv_all.checked,
       ask_owner: form.ask_owner.checked,
       recall_hint: form.recall_hint.checked,
+      retry_transient: form.retry_transient.checked,
       default_bot: form.default_bot.value,
       default_bot_group: form.default_bot_group.value,
       superusers: parseIdList(form.superusers.value),

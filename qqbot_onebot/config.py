@@ -67,6 +67,8 @@ class ServerConfig:
     ask_owner: bool = True
     # 合并转发摊平成多条时附「可回复本消息一次性撤回」提示(撤回功能随提示开关)
     recall_hint: bool = True
+    # 平台报瞬时故障(「请稍后重试」类)时框架内重试 2 次(间隔 1s/3s), 再失败才回 1502 给后端
+    retry_transient: bool = True
     # HTTP API 未指定 bot 时用的 appid; 为空则取第一个连上的 bot
     default_bot: str = ""
     # 管理台 bot 分组与新 bot 的默认分组(不存在时自动补上)
@@ -117,7 +119,8 @@ class ServerConfig:
 # 管理台「选项」页可改的字段 -> 类型
 OPTION_FIELDS: dict[str, type] = {
     "superusers": list, "default_group_list_mode": str, "require_recv_all": bool,
-    "ask_owner": bool, "recall_hint": bool, "default_bot": str, "default_bot_group": str,
+    "ask_owner": bool, "recall_hint": bool, "retry_transient": bool,
+    "default_bot": str, "default_bot_group": str,
 }
 # update_mirror 故意不在内: 它决定 git pull 的源, 只许改 config.json
 

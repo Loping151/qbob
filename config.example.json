@@ -32,6 +32,7 @@
   "require_recv_all": true,
   "ask_owner": true,
   "recall_hint": true,
+  "retry_transient": true,
   "default_bot": "",
   "bot_groups": [
     "默认"
