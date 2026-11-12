@@ -1665,23 +1665,23 @@ class BotInstance:
             return
         state = self._peer_states.get(("group", group_openid))
         compliant = state.compliant if state else False
+        enabled = self.peer_enabled("group", group_openid)
         # 退群即作废状态缓存, 否则重入群丢了 ADD_ROBOT 时会命中旧缓存直接放行
         async with self._state_lock(group_openid):
             await self._forget_group(group_openid)
-        if not compliant:
-            return
-        if not self.peer_enabled("group", group_openid):
-            return
-        group_virtual = await self.idmap.to_virtual(self.appid, "group", group_openid)
-        op_virtual = (
-            await self.idmap.to_virtual(self.appid, "user", op_openid)
-            if op_openid else 0
-        )
-        await self.emit(ob_events.notice_event(
-            self.self_id, "group_decrease", ts, sub_type="kick_me",
-            group_id=group_virtual, operator_id=op_virtual or self.self_id,
-            user_id=self.self_id,
-        ))
+        if compliant and enabled:
+            group_virtual = await self.idmap.to_virtual(self.appid, "group", group_openid)
+            op_virtual = (
+                await self.idmap.to_virtual(self.appid, "user", op_openid)
+                if op_openid else 0
+            )
+            await self.emit(ob_events.notice_event(
+                self.self_id, "group_decrease", ts, sub_type="kick_me",
+                group_id=group_virtual, operator_id=op_virtual or self.self_id,
+                user_id=self.self_id,
+            ))
+        # 通知(连同透传)发完再禁用: 透传闸在下发那一刻看名单. 重新拉进群要 su 再「启用」
+        await self._auto_disable_group(group_openid, "bot 被移出群")
 
     async def _on_friend_add(self, data: dict) -> None:
         ts = _parse_ts(data.get("timestamp"))

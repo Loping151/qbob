@@ -103,6 +103,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 
 `kind` 为 `user` 或 `bot`(查 bot 自己时)。`union_openid` 平台目前下发为空。
 
+任意一条连接都能查任意虚拟号, `appid` 是该号所属 bot 的 AppID, 不一定是发起查询的这条连接。
+
 ### `get_additional_group_detail`
 
 参数 `group_id`, 返回 `group_id`、`platform`、`group_name`、`member_count`、`openid`、`appid`。
@@ -212,7 +214,7 @@ QQ 的图文卡片: 标题 + 简介 + 一张封面, 点卡片打开链接。用�
 |---|---|---|
 | 群消息 / 私聊消息 | ✅ | 含 `at`、`reply`、`image`、`record`、`video`、`file`、`face`、`forward`(聊天记录)、`json`(卡片) |
 | bot 自己发的消息 | ✅ | 平台不回显, 由本框架合成(每 bot 可关) |
-| `group_increase` / `group_decrease` | ✅ | bot 入群/退群、成员入群/退群 |
+| `group_increase` / `group_decrease` | ✅ | bot 入群/退群、成员入群/退群。bot 退群(`kick_me`)下发后该群自动禁用, 重新拉进群要再 `启用` |
 | `friend_add` | ✅ | 用户添加 bot |
 | `request.group.add` | ✅ | 入群申请 |
 | 按钮点击 | ✅ | 私有 notice `qqbot_interaction` |

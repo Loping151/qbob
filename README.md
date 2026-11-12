@@ -6,7 +6,7 @@
 
 **QQ 官方机器人 → OneBot v11**，简称 qbob
 
-[![version](https://img.shields.io/badge/version-0.1.5-12B7F5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.1.9-12B7F5)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 [![QQ Bot](https://img.shields.io/badge/QQ%20Bot-API%20v2-12B7F5)](https://bot.q.qq.com/wiki/)
@@ -117,7 +117,7 @@ journalctl -u qqbot-onebot -f
   <img src="docs/assets/demo_enable.png" width="300" alt="私聊启用">
 </p>
 
-`禁用` 用法相同。bot 被移出群后，平台一报「机器人非群成员」该群就自动禁用，重新拉进群要再 `启用`。
+`禁用` 用法相同。bot 被移出群（收到退群事件，或平台报「机器人非群成员」）该群自动禁用，重新拉进群要再 `启用`。
 
 ## 选项
 

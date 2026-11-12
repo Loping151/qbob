@@ -942,21 +942,19 @@ async def get_additional_user_detail(bot: "BotInstance", params: dict) -> dict:
     size = _int_of(params.get("size", 640)) if params.get("size") is not None else 640
 
     if virtual == bot.self_id:
-        openid, nickname, kind = bot.appid, bot.name, "bot"
+        appid, openid, nickname, kind = bot.appid, bot.appid, bot.name, "bot"
     else:
+        # id 映射全实例共用: 虚拟号属于哪个 appid 都能答, 头像按它自己的 appid 拼。
+        # 后端不必知道该问哪条连接(以前只答本 appid 的号, 后端要逐条试)
         entry = bot.idmap.lookup_virtual(virtual)
-        if entry is None or entry.bot_appid != bot.appid:
+        if entry is None:
             return failed(1404, "user not found")
-        openid, nickname, kind = entry.openid, entry.nickname, entry.kind
+        appid, openid, nickname, kind = entry.bot_appid, entry.openid, entry.nickname, entry.kind
 
     spec = "0" if size == 0 else ("100" if size <= 100 else "640")
-    if kind == "bot":
-        # /users/@me 的头像优先
-        avatar_url = bot.me_info.get("avatar") or (
-            f"https://q.qlogo.cn/qqapp/{bot.appid}/{openid}/{spec}"
-        )
-    else:
-        avatar_url = f"https://q.qlogo.cn/qqapp/{bot.appid}/{openid}/{spec}"
+    avatar_url = f"https://q.qlogo.cn/qqapp/{appid}/{openid}/{spec}"
+    if kind == "bot" and appid == bot.appid:
+        avatar_url = bot.me_info.get("avatar") or avatar_url  # /users/@me 的头像优先
 
     union = None
     row = await bot.db.fetchone(
@@ -977,7 +975,7 @@ async def get_additional_user_detail(bot: "BotInstance", params: dict) -> dict:
         # 扩展字段: 真实平台标识
         "openid": openid,
         "union_openid": union or "",
-        "appid": bot.appid,
+        "appid": appid,
         "kind": kind,
     })
 
