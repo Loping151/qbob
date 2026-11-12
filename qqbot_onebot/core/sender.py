@@ -47,7 +47,7 @@ from ..idmap import is_virtual_id
 from ..plugin import HookContext, registry as plugins
 from ..qq.api import QQApiError
 from ..onebot import events as ob_events
-from ..onebot.segments import emoji_of, normalize_message
+from ..onebot.segments import emoji_of, normalize_message, with_file_ids
 from . import cards, cdnkeys, forwardpage, textimg
 from .quota import BEIJING
 from .textimg import TEXT_IMAGE_MIN_CHARS, extract_links, looks_like_markdown
@@ -1357,6 +1357,7 @@ class Sender:
             return
         if not self.bot.peer_enabled(chat_type, peer_openid):
             return
+        segments = with_file_ids(segments)
         ts = int(time.time())
         nickname = str(self.bot.cfg.get("name") or "")
         if chat_type == "group":

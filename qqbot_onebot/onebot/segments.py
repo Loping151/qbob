@@ -88,6 +88,21 @@ def normalize_message(message: Any) -> list[dict]:
     return segments
 
 
+# 收到的消息里这几种段都带 file_id(见 core/bot.py 解析附件); 后端按它认文件(nonebot-plugin-alconna 缺了直接 KeyError)
+_FILE_ID_SEG_TYPES = ("image", "record", "video", "file")
+
+
+def with_file_ids(segments: list[dict]) -> list[dict]:
+    """给缺 file_id 的媒体段补上(取 url, 没有就取 file), bot 自己发的消息与收到的同一口径."""
+    out: list[dict] = []
+    for seg in segments:
+        data = seg.get("data") if isinstance(seg, dict) else None
+        if isinstance(data, dict) and seg.get("type") in _FILE_ID_SEG_TYPES and not data.get("file_id"):
+            seg = {**seg, "data": {**data, "file_id": data.get("url") or data.get("file") or ""}}
+        out.append(seg)
+    return out
+
+
 def plaintext(segments: list[dict]) -> str:
     return "".join(
         str(seg.get("data", {}).get("text", ""))

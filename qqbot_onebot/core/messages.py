@@ -13,6 +13,7 @@ import secrets
 import time
 
 from ..db import Database
+from ..onebot.segments import with_file_ids
 
 logger = logging.getLogger("qqbot.messages")
 
@@ -45,11 +46,10 @@ def _shrink(value, depth: int = 0):
 
 
 def sanitize_segments(segments) -> list[dict]:
-    """入库前截断超长字段并限制总长; 媒体本体已在 data/media, 库里只留标记."""
+    """入库前截断超长字段并限制总长; 媒体本体已在 data/media, 库里只留标记.
+    媒体段缺 file_id 的补上: get_msg / 引用回查读的就是库里这份."""
     out: list[dict] = []
-    for seg in segments or []:
-        if not isinstance(seg, dict):
-            continue
+    for seg in with_file_ids([seg for seg in segments or [] if isinstance(seg, dict)]):
         data = {k: _shrink(v) for k, v in (seg.get("data") or {}).items()}
         out.append({"type": seg.get("type", "text"), "data": data})
     # 兜底: 段数极多时总量仍可能超限
