@@ -451,9 +451,15 @@ async def get_group_list(bot: "BotInstance", params: dict) -> dict:
     return ok(groups)
 
 
-async def _self_member_role(bot: "BotInstance", group_openid: str) -> tuple[str, int]:
-    """bot 在该群的 (角色, 入群时间), 走 peer_state 缓存."""
-    state = await bot.group_state(group_openid, reason="member-info")
+def _no_cache(params: dict) -> bool:
+    return str(params.get("no_cache")).lower() in ("true", "1")
+
+
+async def _self_member_role(bot: "BotInstance", group_openid: str,
+                            force: bool = False) -> tuple[str, int]:
+    """bot 在该群的 (角色, 入群时间). 提权/降权平台不推事件, 缓存超过
+    ROLE_FRESH_SECONDS 或 force(插件传 no_cache)就刷一次 bot_state."""
+    state = await bot.role_fresh_state(group_openid, force, reason="member-info")
     join_time = 0
     if state.joined_at:
         try:
@@ -473,7 +479,8 @@ async def get_group_member_info(bot: "BotInstance", params: dict) -> dict:
     group_virtual = _int_of(params.get("group_id"))
 
     if virtual == bot.self_id:
-        role, join_time = await _self_member_role(bot, group_openid)
+        role, join_time = await _self_member_role(bot, group_openid,
+                                                  _no_cache(params))
         return ok(_member_dict(group_virtual, bot.self_id, bot.name, "",
                                role, join_time))
 
@@ -526,7 +533,8 @@ async def get_group_member_list(bot: "BotInstance", params: dict) -> dict:
             row["role"], 0, last_sent=row["last_seen"],
         ))
     # bot 用真实角色, 写死 member 会让统计群管的逻辑漏掉 bot
-    self_role, self_join = await _self_member_role(bot, group_openid)
+    self_role, self_join = await _self_member_role(bot, group_openid,
+                                                   _no_cache(params))
     members.append(_member_dict(group_virtual, bot.self_id, bot.name, "",
                                 self_role, self_join))
     # TODO(qq-official): 无全量成员接口, 仅返回发言缓存过的成员(90 天没出现的会被清掉)

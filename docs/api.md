@@ -171,7 +171,7 @@ QQ 的图文卡片: 标题 + 简介 + 一张封面, 点卡片打开链接。用�
 | `get_group_info` | ✅ | 官方接口: 群名、人数 |
 | `get_group_at_all_remain` | ✅ | 今天还能否 @全体: bot 是群管且当天没用过为 1, 否则 0 |
 | `get_group_list` | 降级 | 见过且已启用的群 |
-| `get_group_member_info` | 降级 | bot 自己的角色走官方接口; 其他成员来自发言缓存 |
+| `get_group_member_info` | 降级 | bot 自己的角色走官方接口(缓存 5 分钟, `no_cache` 强制刷新, 同群 30 秒内只查一次); 其他成员来自发言缓存 |
 | `get_group_member_list` | 降级 | 近 90 天发言过的成员, 最近发言的在前 |
 | `set_group_ban` | ✅ | 禁言单个成员(bot 须为群管) |
 | `set_group_add_request` | ✅ | 入群申请审批 |

@@ -665,18 +665,21 @@ class BotInstance:
                         state.allow_proactive, state.recv_msg_setting, state.bot_role)
             return state
 
-    async def group_role(self, group_openid: str, force: bool = False) -> str:
-        """bot 在该群的角色, 缓存太旧(或 force)就刷一次(提权平台不推事件).
+    async def role_fresh_state(self, group_openid: str, force: bool = False,
+                               reason: str = "role-check") -> PeerState:
+        """要用 bot 角色时的群状态: 缓存太旧(或 force)就刷一次(提权/降权平台不推事件).
 
-        force 给"进入会话"这类用户动作, 仍受 30s/群 节流.
+        force 给"进入会话"、插件 no_cache 这类明确要新值的调用, 仍受 30s/群 节流与全局预算.
         """
         state = self._peer_states.get(("group", group_openid))
         stale = (force or state is None
                  or int(time.time()) - state.checked_at > ROLE_FRESH_SECONDS)
         if stale:
-            state = await self.group_state(group_openid, refresh=True,
-                                           reason="role-check")
-        return state.bot_role if state else ""
+            state = await self.group_state(group_openid, refresh=True, reason=reason)
+        return state
+
+    async def group_role(self, group_openid: str, force: bool = False) -> str:
+        return (await self.role_fresh_state(group_openid, force)).bot_role
 
     async def refresh_peer_state(self, chat_type: str, openid: str, reason: str) -> None:
         """发送失败(限频/权限)后的后台复查入口."""
