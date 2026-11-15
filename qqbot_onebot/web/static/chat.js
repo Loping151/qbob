@@ -589,7 +589,7 @@ async function pollNewMessages() {
   } catch { /* 轮询失败静默, 下一轮再来 */ }
 }
 
-/** 头像占位: 名字首字, 不用 emoji(Array.from 按码点切, 代理对昵称不出乱码) */
+/** 头像占位: 名字首字, 不用 emoji(Array.from 按码点切, 代理对昵称不出乱码); 已转义 */
 function avatarChar(name) {
   const ch = Array.from(String(name || "").trim())[0] || "";
   return ch ? esc(ch) : "?";
@@ -602,13 +602,12 @@ function bubbleHTML(m) {
   const role = mine ? chatState.botRole : m.role;
   const tag = ROLE_TAG[role];
   const roleTag = tag ? `<span class="badge mini role ${role}">${tag}</span>` : "";
-  // 渲染两个节点, 图挂了就显示藏着的占位(免得把昵称拼进 onerror 的 JS 串)
-  const ph = `<span class="bub-ava ph">${avatarChar(name)}</span>`;
+  // 图挂了由 app.js 的 onMediaError 处理: 先换 data-fb 的备用链接, 再挂换成首字占位
+  const fb = m.avatar_fb ? ` data-fb="${esc(m.avatar_fb)}"` : "";
   const avatar = m.avatar
-    ? `<img class="bub-ava" src="${esc(m.avatar)}" alt="" loading="lazy" referrerpolicy="no-referrer"
-         onerror="this.remove();this.nextElementSibling.classList.remove('hidden')"
-       ><span class="bub-ava ph hidden">${avatarChar(name)}</span>`
-    : ph;
+    ? `<img class="bub-ava" src="${esc(m.avatar)}"${fb} data-gone="${avatarChar(name)}"
+         data-gone-class="bub-ava ph" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : `<span class="bub-ava ph">${avatarChar(name)}</span>`;
   return `<div class="bub-row ${mine ? "mine" : ""}" data-mid="${m.mid}">
     ${avatar}
     <div class="bub-col">
@@ -674,7 +673,7 @@ function segmentsHTML(segments, md = false) {
         parts.push(url
           ? `<img class="seg-img" src="${esc(url)}" data-zoom="${esc(url)}" alt="图片"
                loading="lazy" referrerpolicy="no-referrer" decoding="async"
-               onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'seg-gone',textContent:'[图片已失效]'}))">`
+               data-gone="[图片已失效]">`
           : '<span class="seg-gone">[图片]</span>');
         break;
       }
@@ -775,8 +774,7 @@ function mdImage(url, alt) {
   // QQ 的 markdown 图片写作 ![说明 #宽px #高px](url), 尺寸标记不是说明文字
   const text = esc(alt.replace(/#\d+px/g, "").trim() || "图片");
   return `<img class="seg-img" src="${esc(url)}" data-zoom="${esc(url)}" alt="${text}"
-     loading="lazy" referrerpolicy="no-referrer" decoding="async"
-     onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'seg-gone',textContent:'[图片已失效]'}))">`;
+     loading="lazy" referrerpolicy="no-referrer" decoding="async" data-gone="[图片已失效]">`;
 }
 
 /** 强调类: 在**已转义**的串上做, 所以只会产出我们自己的标签 */

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS id_map (
     nickname     TEXT NOT NULL DEFAULT '',
     first_seen   INTEGER NOT NULL,
     last_seen    INTEGER NOT NULL,
+    avatar       TEXT NOT NULL DEFAULT '',     -- 平台下发的头像链接(author.avatar)
     UNIQUE (bot_appid, kind, openid)
 );
 CREATE INDEX IF NOT EXISTS idx_idmap_openid ON id_map (openid);
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS group_members (
     nickname     TEXT NOT NULL DEFAULT '',
     role         TEXT NOT NULL DEFAULT 'member',
     last_seen    INTEGER NOT NULL,
+    card         TEXT NOT NULL DEFAULT '',     -- 群名片(author.member_nickname)
     PRIMARY KEY (bot_appid, group_openid, user_openid)
 );
 -- 按 last_seen 清理早已退群的成员(这张表原本只减不增靠成员退群事件)
@@ -235,6 +237,9 @@ MIGRATIONS = [
      "passthrough_webhooks TEXT NOT NULL DEFAULT '[]'"),
     # 引用按内容找回时比对: 转发转网页等改写后, content 记的是原消息
     ("messages", "sent_text", "sent_text TEXT NOT NULL DEFAULT ''"),
+    # 2026-11-13 起群消息 author 带 member_nickname(群名片) 与 avatar(头像链接)
+    ("group_members", "card", "card TEXT NOT NULL DEFAULT ''"),
+    ("id_map", "avatar", "avatar TEXT NOT NULL DEFAULT ''"),
 ]
 
 

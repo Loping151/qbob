@@ -48,7 +48,7 @@ from ..plugin import HookContext, registry as plugins
 from ..qq.api import QQApiError
 from ..onebot import events as ob_events
 from ..onebot.segments import emoji_of, normalize_message, with_file_ids
-from . import cards, cdnkeys, forwardpage, textimg
+from . import avatars, cards, cdnkeys, forwardpage, textimg
 from .quota import BEIJING
 from .textimg import TEXT_IMAGE_MIN_CHARS, extract_links, looks_like_markdown
 from .uploader import MediaTooLarge
@@ -862,7 +862,7 @@ class Sender:
                     uid = int(data.get("user_id") or data.get("uin") or 0)
                 except (TypeError, ValueError):
                     uid = 0
-                data["avatar"] = self._avatar_of(uid)
+                data["avatar"], data["avatar_fb"] = self._avatar_pair(uid)
                 if not (data.get("nickname") or data.get("name")):
                     # 只给了 uin 不给名字: 反查出来
                     data["nickname"] = self._display_of(uid)
@@ -874,10 +874,11 @@ class Sender:
                     uid = int(sender.get("user_id") or 0)
                 except (TypeError, ValueError):
                     uid = 0
+                avatar, avatar_fb = self._avatar_pair(uid)
                 out.append({"type": "node", "data": {
                     "nickname": str(sender.get("nickname") or ""),
                     "user_id": uid, "time": seg.get("time") or 0,
-                    "avatar": self._avatar_of(uid),
+                    "avatar": avatar, "avatar_fb": avatar_fb,
                     "content": (await self._expand_nested(seg["message"], depth + 1)
                                 if deeper else seg["message"]),
                 }})
@@ -995,7 +996,7 @@ class Sender:
                                   peer_openid: str, base: str) -> str:
         """转发节点建成一页网页(媒体上传给平台换 CDN 地址), 返回网页地址."""
         for node in nodes:
-            node["avatar"] = self._avatar_of(node.pop("uid", 0))
+            node["avatar"], node["avatar_fb"] = self._avatar_pair(node.pop("uid", 0))
         # token 按上传前的内容算: 同一份转发再发时页面已在, 不再上传
         token = forwardpage.page_token(self.bot.appid, nodes)
         before = [node["segments"] for node in nodes]
@@ -1042,23 +1043,27 @@ class Sender:
         return f"{base.rstrip('/')}/f/{token}"
 
     def _avatar_of(self, virtual_id: int) -> str:
-        """节点发送者头像: idmap 用户走 q.qlogo.cn/qqapp/{appid}/{openid}/100, bot 用配置里的;
-        5~11 位当普通 QQ 号走 q.qlogo.cn/g?b=qq&nk=; 都不是退回本 bot 头像."""
+        return self._avatar_pair(virtual_id)[0]
+
+    def _avatar_pair(self, virtual_id: int) -> tuple[str, str]:
+        """节点发送者头像(首选, 备用): idmap 用户优先平台下发的链接, 备用自拼
+        q.qlogo.cn/qqapp/{appid}/{openid}/100(页面脚本在首选失效时换上), 没下发过就直接自拼;
+        bot 用配置里的; 5~11 位当普通 QQ 号走 q.qlogo.cn/g?b=qq&nk=; 都不是退回本 bot 头像."""
         uid = int(virtual_id or 0)
         entry = self.bot.idmap.lookup_virtual(uid) if uid else None
         if entry is None:
             if 10000 <= uid < 10 ** 11 and not is_virtual_id(uid):
-                return f"https://q.qlogo.cn/g?b=qq&nk={uid}&s=100"
-            return str(self.bot.cfg.get("avatar") or "")
+                return f"https://q.qlogo.cn/g?b=qq&nk={uid}&s=100", ""
+            return str(self.bot.cfg.get("avatar") or ""), ""
         if entry.kind == "bot":
             if entry.openid == self.bot.appid:
-                return str(self.bot.cfg.get("avatar") or "")
+                return str(self.bot.cfg.get("avatar") or ""), ""
             manager = getattr(self.bot, "manager", None)
             other = manager.get_bot(entry.openid) if manager else None
-            return str(other.cfg.get("avatar") or "") if other else ""
+            return (str(other.cfg.get("avatar") or "") if other else ""), ""
         if entry.kind != "user":
-            return ""
-        return f"https://q.qlogo.cn/qqapp/{entry.bot_appid}/{entry.openid}/100"
+            return "", ""
+        return avatars.candidates(entry, "100")
 
     def _display_of(self, virtual_id: int) -> str:
         """节点发送者的显示名(uin 反查): bot 用配置里的名字, 用户用 idmap 记的昵称."""

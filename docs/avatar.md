@@ -9,7 +9,9 @@
 
 `get_additional_user_detail` 的参数与返回见[接口文档](api.md#get_additional_user_detail)。要点:
 
-- 返回的地址形如 `https://q.qlogo.cn/qqapp/{appid}/{openid}/{0|100|640}`, 对同一个人固定不变, 可以长期缓存;
+- 该用户在群里发过言时, 返回平台随消息下发的头像链接(`https://thirdqq.qlogo.cn/bqqthird?key=…&s={0|100|640}`,
+  适配器先验过能打开才给); 没有或已失效时返回 `https://q.qlogo.cn/qqapp/{appid}/{openid}/{0|100|640}`。
+  两者是同一张图; 前者带签名、每条消息都换, 要缓存就缓存图片本身, 别长期缓存链接;
 - **用哪条 bot 连接查都行**: ID 映射全实例共用, 返回的 `appid` 是该 ID 所属的 bot(0.1.8 及以前只有那个 bot 认得, 别的返回 1404);
 - `size`: 0 原图、≤100 小图、其它 640。
 

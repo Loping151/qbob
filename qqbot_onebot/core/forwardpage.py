@@ -478,7 +478,16 @@ V.forEach(function(v){io.observe(v)});
 })();
 """.strip()
 
-_SCRIPT = _LB_SCRIPT + "\n" + _VID_SCRIPT + "\n" + _GL_SCRIPT
+# 头像加载失败换 data-fb 的备用链接(平台下发的头像链接带签名, 页面长期留着会失效);
+# 脚本在页尾, 已经失败的那些按 complete && !naturalWidth 补换
+_AV_SCRIPT = r"""
+(function(){function fb(im){var u=im.getAttribute('data-fb');if(!u)return;im.removeAttribute('data-fb');im.src=u}
+document.addEventListener('error',function(e){var t=e.target;if(t&&t.tagName==='IMG'&&t.hasAttribute('data-fb'))fb(t)},true);
+[].forEach.call(document.querySelectorAll('img[data-fb]'),function(im){if(im.complete&&!im.naturalWidth)fb(im)});
+})();
+""".strip()
+
+_SCRIPT = _LB_SCRIPT + "\n" + _VID_SCRIPT + "\n" + _GL_SCRIPT + "\n" + _AV_SCRIPT
 
 # 诊断页(/f/<任意 token>?diag=1): 打印浏览器能力并摆几块只差一个属性的板子, 截图定位问题.
 # 只在诊断页拼入, CSP 哈希单算.
@@ -693,6 +702,7 @@ def normalize_nodes(raw: list) -> list[dict]:
         # uid 供 sender 反查头像, 落库前换成 avatar URL
         nodes.append({"name": str(name), "time": stamp, "uid": uid,
                       "avatar": str(data.get("avatar") or ""),
+                      "avatar_fb": str(data.get("avatar_fb") or ""),
                       "segments": [s for s in segments if isinstance(s, dict)]})
     if dropped:
         logger.warning("合并转发丢弃 %d/%d 个节点(上游形状没吃下来): %s",
@@ -726,9 +736,15 @@ def summarize(nodes: list[dict]) -> str:
     return " · ".join(parts)
 
 
+_TOKEN_SKIP = ("avatar", "avatar_fb")
+
+
 def page_token(appid: str, nodes: list[dict]) -> str:
-    """内容哈希作 token: 多群广播只建一页, 且不可推测."""
-    blob = json.dumps([appid, nodes], ensure_ascii=False, sort_keys=True)
+    """内容哈希作 token: 多群广播只建一页, 且不可推测.
+    头像不算内容: 平台下发的头像链接每条消息换签名, 算进去同一份转发会重复建页."""
+    stable = [{k: v for k, v in node.items() if k not in _TOKEN_SKIP}
+              if isinstance(node, dict) else node for node in nodes]
+    blob = json.dumps([appid, stable], ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:20]
 
 
@@ -916,11 +932,13 @@ def _render_groups(nodes: list[dict], media: _Media, depth: int) -> list[str]:
             rows.append(f'<div class="m">{stamp}'
                         f'{_render_segments(node["segments"], media, depth)}</div>')
         pic = _safe_url(members[0].get("avatar"))
+        pic_fb = _safe_url(members[0].get("avatar_fb"))
         hue = f" a{_hue_index(name)}" if name else ""
         head = f'<div class="name">{_esc(name)}</div>' if name else ""
         # 真头像用 .im 标记, 不进玻璃层
         if pic:
-            avatar = (f'<div class="av im"><img src="{_esc(pic)}" alt="" '
+            fb = f' data-fb="{_esc(pic_fb)}"' if pic_fb and pic_fb != pic else ""
+            avatar = (f'<div class="av im"><img src="{_esc(pic)}"{fb} alt="" '
                       f'loading="lazy" decoding="async"></div>')
         elif name:
             avatar = f'<div class="av">{_esc(name.strip()[:1])}</div>'

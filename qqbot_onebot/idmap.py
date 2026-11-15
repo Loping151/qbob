@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .db import Database
 
 VIRTUAL_BASE = 10**14
 VIRTUAL_SPAN = 9 * 10**14  # [1e14, 1e15)
+# author.avatar 的签名 key 每条消息都换, 内存随时更新, 落库限频(旧 key 照样能用)
+AVATAR_SAVE_INTERVAL = 3600
 
 
 def _hash_candidate(kind: str, bot_appid: str, openid: str, salt: int) -> int:
@@ -33,6 +35,8 @@ class MapEntry:
     kind: str  # 'user' | 'group' | 'bot'
     openid: str
     nickname: str = ""
+    avatar: str = ""          # 平台下发的头像链接, 空=没下发过
+    avatar_saved: float = field(default=0.0, compare=False)
 
 
 class IdMap:
@@ -43,12 +47,12 @@ class IdMap:
 
     async def load(self) -> None:
         rows = await self.db.fetchall(
-            "SELECT virtual_id, bot_appid, kind, openid, nickname FROM id_map"
+            "SELECT virtual_id, bot_appid, kind, openid, nickname, avatar FROM id_map"
         )
         for row in rows:
             entry = MapEntry(
                 row["virtual_id"], row["bot_appid"], row["kind"],
-                row["openid"], row["nickname"],
+                row["openid"], row["nickname"], row["avatar"] or "",
             )
             self._cache(entry)
 
@@ -71,17 +75,27 @@ class IdMap:
         openid: str,
         nickname: str = "",
         union_openid: str | None = None,
+        avatar: str = "",
     ) -> int:
-        """取(或建)openid 的虚拟号, 顺带更新昵称."""
+        """取(或建)openid 的虚拟号, 顺带更新昵称与头像链接."""
         key = (bot_appid, kind, openid)
         cached = self._by_key.get(key)
         now = int(time.time())
         if cached is not None:
-            if nickname and nickname != cached.nickname:
+            renamed = bool(nickname) and nickname != cached.nickname
+            save_avatar = bool(avatar) and avatar != cached.avatar and (
+                renamed or not cached.avatar
+                or now - cached.avatar_saved >= AVATAR_SAVE_INTERVAL)
+            if renamed:
                 cached.nickname = nickname
+            if avatar:
+                cached.avatar = avatar
+            if renamed or save_avatar:
+                if save_avatar:
+                    cached.avatar_saved = now
                 await self.db.execute(
-                    "UPDATE id_map SET nickname=?, last_seen=? WHERE virtual_id=?",
-                    (nickname, now, cached.virtual_id),
+                    "UPDATE id_map SET nickname=?, avatar=?, last_seen=? WHERE virtual_id=?",
+                    (cached.nickname, cached.avatar, now, cached.virtual_id),
                 )
             return cached.virtual_id
 
@@ -91,24 +105,26 @@ class IdMap:
             try:
                 await self.db.execute(
                     "INSERT INTO id_map (virtual_id, bot_appid, kind, openid,"
-                    " union_openid, nickname, first_seen, last_seen)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
-                    (candidate, bot_appid, kind, openid, union_openid, nickname, now, now),
+                    " union_openid, nickname, first_seen, last_seen, avatar)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (candidate, bot_appid, kind, openid, union_openid, nickname,
+                     now, now, avatar),
                 )
             except Exception:
                 # virtual_id 撞号 -> 换盐重试; (bot,kind,openid) 已存在 -> 读回
                 row = await self.db.fetchone(
-                    "SELECT virtual_id, nickname FROM id_map"
+                    "SELECT virtual_id, nickname, avatar FROM id_map"
                     " WHERE bot_appid=? AND kind=? AND openid=?",
                     key,
                 )
                 if row is not None:
                     entry = MapEntry(row["virtual_id"], bot_appid, kind, openid,
-                                     row["nickname"])
+                                     row["nickname"], avatar or row["avatar"] or "")
                     self._cache(entry)
                     return entry.virtual_id
                 continue
-            entry = MapEntry(candidate, bot_appid, kind, openid, nickname)
+            entry = MapEntry(candidate, bot_appid, kind, openid, nickname, avatar,
+                             avatar_saved=now if avatar else 0.0)
             self._cache(entry)
             return candidate
         raise RuntimeError(f"id_map: exhausted salts for {key}")

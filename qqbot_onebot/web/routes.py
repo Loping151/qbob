@@ -17,6 +17,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from ..core import avatars
 from ..db import insert_bot, row_to_bot
 from .auth import SESSION_COOKIE, credential_error, hash_password, require_role
 
@@ -1138,17 +1139,20 @@ def build_router() -> APIRouter:
     NOT_SHADOW = "(direction!='in' OR user_virtual!=0 OR qq_msg_id!='')"
     NOT_SHADOW_M = "(m.direction!='in' OR m.user_virtual!=0 OR m.qq_msg_id!='')"
 
-    def _avatar_of(manager, virtual_id: int) -> str:
-        """用户头像: q.qlogo.cn/qqapp/{appid}/{openid}/100."""
+    def _avatar_pair(manager, virtual_id: int) -> tuple[str, str]:
+        """(头像, 备用): 用户优先平台下发的链接, 备用自拼 q.qlogo.cn/qqapp(首选加载失败时 app.js 的 onMediaError 换上)."""
         entry = manager.idmap.lookup_virtual(int(virtual_id or 0))
         if entry is None:
-            return ""
+            return "", ""
         if entry.kind == "bot":
             row = manager.get_bot(entry.openid)
-            return str(row.cfg.get("avatar", "")) if row else ""
+            return (str(row.cfg.get("avatar", "")) if row else ""), ""
         if entry.kind != "user":
-            return ""
-        return f"https://q.qlogo.cn/qqapp/{entry.bot_appid}/{entry.openid}/100"
+            return "", ""
+        return avatars.candidates(entry, "100")
+
+    def _avatar_of(manager, virtual_id: int) -> str:
+        return _avatar_pair(manager, virtual_id)[0]
 
     def _sender_role(record: dict) -> str:
         """落库时记下的群身份(owner/admin/member)."""
@@ -1264,13 +1268,15 @@ def build_router() -> APIRouter:
                     if qq and qq != "all" and not data.get("name"):
                         data["name"] = _display_name(manager, int(qq or 0), "")
                         seg["data"] = data
+            avatar, avatar_fb = _avatar_pair(manager, uid)
             items.append({
                 "mid": row["mid"],
                 "direction": row["direction"],
                 "user_id": uid,
                 "nickname": (sender.get("card") or sender.get("nickname")
                              or _display_name(manager, uid, "")),
-                "avatar": _avatar_of(manager, uid),
+                "avatar": avatar,
+                "avatar_fb": avatar_fb,
                 "role": sender.get("role", ""),
                 "content": content,
                 "ts": row["ts"],

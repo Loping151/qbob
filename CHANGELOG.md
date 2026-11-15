@@ -2,6 +2,13 @@
 
 项目始于 2026-08-12.
 
+## 0.1.12 (2026-11-15)
+
+- 群消息的 `sender.card` 填群名片: 平台 2026-11-13 起在 `author.member_nickname` 下发(文档未写), `sender.nickname` 仍是 QQ 昵称。`get_group_member_info` / `get_group_member_list` 的 `card` 取该成员最近一条消息里的群名片, 以前恒等于昵称
+- 用户头像优先用平台随群消息下发的 `author.avatar`(`thirdqq.qlogo.cn`, 带签名), 空或失效才用自拼的 `q.qlogo.cn/qqapp/...`: `get_additional_user_detail` 先验链接能否打开(签名失效时平台回 400), 转发网页与管理台聊天室在首选加载失败时换成自拼的。转发网页的 token 不再含头像, 同一份转发再发仍复用同一页
+- 平台下发字段监视: 所有已处理事件的 payload 逐层(含嵌套与数组)对照文档与实测的字段, 新出现的字段路径记进 `unparsed.jsonl`(kind `new_field`), 每条路径留 3 份样本, 计数存库, 重启不重记, 全部 bot 共用一份。以前只看消息事件的顶层字段, 这次 `author` 里的两个新字段就没记下来
+- 管理台的图片/视频加载失败改由脚本统一处理(app.js 的捕获监听, 元素用 `data-fb` / `data-gone` 声明备用链接与占位): 聊天室头像换备用链接或首字占位, 聊天里失效的图片显示「[图片已失效]」, bot 卡片头像显示 🤖, 消息详情里失效的图片/视频显示「[…已失效]」。以前这些都写在内联 `onerror` 里, 管理台的 CSP(`script-src 'self'`)不执行它, 一直只显示破图
+
 ## 0.1.11 (2026-11-14)
 
 - `get_group_member_info` / `get_group_member_list` 里 bot 自己的角色缓存超过 5 分钟就重查群状态, 传 `no_cache` 时强制重查(同群 30 秒内只查一次)。bot 被设为或取消管理员时平台不推事件, 以前首次查到后就一直沿用, 插件据此判断能否撤回、禁言会判错

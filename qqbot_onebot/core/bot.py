@@ -42,6 +42,7 @@ from .passthrough import Passthrough
 from .quota import QuotaTracker
 from .sender import Sender
 from .unparsed import UnparsedLog, files as unparsed_files
+from .fieldwatch import FieldWatch
 from . import cards, cdnkeys
 from .uploader import MediaUploader
 
@@ -194,6 +195,14 @@ def _find_link(node, depth: int = 0) -> str:
     return ""
 
 
+def _avatar_link(author: dict) -> str:
+    """author.avatar(2026-11-13 起下发); 只收 http(s), http 升成 https."""
+    url = str(author.get("avatar") or "").strip()
+    if url.startswith("http://"):
+        url = "https://" + url[len("http://"):]
+    return url if url.startswith("https://") else ""
+
+
 def _parse_ts(value: Any) -> int:
     if isinstance(value, (int, float)):
         return int(value)
@@ -249,6 +258,7 @@ class BotInstance:
         token_urls: list[str],
         api_bases: list[str],
         unparsed: UnparsedLog | None = None,
+        fieldwatch: FieldWatch | None = None,
     ):
         self.cfg = row
         self.appid: str = row["appid"]
@@ -262,6 +272,8 @@ class BotInstance:
         self.unparsed = unparsed or UnparsedLog(
             unparsed_files(Path(getattr(db, "path", "data/x")).parent)[0]
         )
+        # 新下发字段监视: manager 传全部 bot 共用的那份
+        self.fieldwatch = fieldwatch or FieldWatch(db, self.unparsed)
         self.api = QQApiClient(self.appid, self.secret, token_urls, api_bases, http)
         self.api.on_credential_error = self._on_credential_error
         self.api.on_fatal_code = self._on_fatal_code
@@ -821,6 +833,10 @@ class BotInstance:
         # 通知类事件的 event_id 可当被动回复凭据, 不吃主动消息配额
         if event_id:
             await self._record_event_credential(event_type, data, event_id)
+        try:
+            await self.fieldwatch.check(event_type, data, self.appid)
+        except Exception:
+            logger.exception("[%s] 字段监视出错(不影响处理)", self.appid)
         current = {"t": event_type, "d": data, "id": event_id, "sent": False}
         token = _RAW_EVENT.set(current)
         try:
@@ -1008,13 +1024,6 @@ class BotInstance:
                     "size": att.get("size", 0), "file_size": att.get("size", 0),
                 }})
         return segments
-
-    # 已知会消费的 payload 字段; 出现其它字段就落盘, 便于事后补解析
-    _KNOWN_MSG_FIELDS = {
-        "id", "author", "content", "timestamp", "attachments", "group_openid",
-        "group_id", "message_type", "message_scene", "msg_elements", "mentions",
-        "message_reference", "ark_data", "op_member_openid",
-    }
 
     @staticmethod
     def _msg_idx_of(data: dict) -> str:
@@ -1366,12 +1375,6 @@ class BotInstance:
                     f"{sorted((ark.get('fields') or {}).keys())}",
                     ark, self.appid,
                 )
-
-        unknown = set(data) - self._KNOWN_MSG_FIELDS
-        if unknown:
-            self.unparsed.record("unknown_fields",
-                                 f"payload 出现未知字段: {sorted(unknown)}",
-                                 data, self.appid)
         return segments
 
     async def _group_gate(self, group_openid: str, text: str) -> bool:
@@ -1445,6 +1448,9 @@ class BotInstance:
             # 能收到非 @ 消息本身就证明该群开了"接收全部消息"
             await self._note_recv_all(group_openid)
         nickname = author.get("username", "") or ""
+        # 2026-11-13 起下发(文档未写): 群名片 / 头像链接
+        card = str(author.get("member_nickname") or "")
+        avatar = _avatar_link(author)
         payload_role = author.get("member_role", "") or ""
         ts = _parse_ts(data.get("timestamp"))
 
@@ -1474,19 +1480,20 @@ class BotInstance:
         group_virtual = await self.idmap.to_virtual(self.appid, "group", group_openid)
         user_virtual = await self.idmap.to_virtual(
             self.appid, "user", user_openid, nickname=nickname,
-            union_openid=author.get("union_openid") or None,
+            union_openid=author.get("union_openid") or None, avatar=avatar,
         )
         # role 仅在 payload 显式给出时覆盖缓存(GROUP_ADD_ROBOT 写入的 admin 不被冲掉)
         await self.db.execute(
             "INSERT INTO group_members (bot_appid, group_openid, user_openid,"
-            " nickname, role, last_seen) VALUES (?,?,?,?,?,?)"
+            " nickname, role, last_seen, card) VALUES (?,?,?,?,?,?,?)"
             " ON CONFLICT(bot_appid, group_openid, user_openid) DO UPDATE SET"
             " nickname=CASE WHEN excluded.nickname!='' THEN excluded.nickname ELSE nickname END,"
             " role=CASE WHEN ?!='' THEN ? ELSE role END,"
+            " card=CASE WHEN excluded.card!='' THEN excluded.card ELSE card END,"
             " last_seen=excluded.last_seen",
             # 原始 payload_role 只用来判给没给, 写入的值统一归一化
             (self.appid, group_openid, user_openid, nickname,
-             self._norm_role(payload_role), ts,
+             self._norm_role(payload_role), ts, card,
              payload_role, self._norm_role(payload_role)),
         )
         role = await self._member_role(group_openid, user_openid, payload_role)
@@ -1512,7 +1519,7 @@ class BotInstance:
         segments.extend(extra)
 
         at_me = at_me or at_in_text
-        sender = ob_events.make_sender(user_virtual, nickname, role)
+        sender = ob_events.make_sender(user_virtual, nickname, role, card=card)
         mid = await self.store.record_incoming(
             self.appid, "group", group_openid, group_virtual, user_virtual,
             qq_msg_id, segments, sender, ts, msg_idx=self._msg_idx_of(data),
@@ -1576,6 +1583,7 @@ class BotInstance:
         user_virtual = await self.idmap.to_virtual(
             self.appid, "user", user_openid,
             union_openid=author.get("union_openid") or None,
+            avatar=_avatar_link(author),
         )
 
         text = (data.get("content") or "").strip()

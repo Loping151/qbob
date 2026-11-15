@@ -32,11 +32,13 @@ def heartbeat_event(self_id: int, interval_ms: int) -> dict:
     }
 
 
-def make_sender(user_id: int, nickname: str, role: str = "member") -> dict:
+def make_sender(user_id: int, nickname: str, role: str = "member",
+                card: str = "") -> dict:
+    """nickname=QQ 昵称(author.username), card=群名片(author.member_nickname)."""
     return {
         "user_id": user_id,
         "nickname": nickname or "",
-        "card": "",
+        "card": card or "",
         "sex": "unknown",
         "age": 0,
         "area": "",

@@ -38,6 +38,25 @@ export function debounce(fn, ms = 300) {
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
+// 图片/视频加载失败. 管理台 CSP(script-src 'self')不执行内联 onerror(2026-11-15 无头 Chrome 实测),
+// 全站统一在这里接; error 不冒泡, 用捕获阶段. 元素用 data 属性声明怎么处理:
+// data-fb 有备用链接先换上(只换一次); 再失败按 data-gone 换成占位文字, data-gone-class 指定样式(默认 seg-gone)
+function onMediaError(e) {
+  const el = e.target;
+  const ds = el?.dataset;
+  if (!ds) return;
+  if (ds.fb) {
+    const fb = ds.fb;
+    delete ds.fb;
+    el.src = fb;
+    return;
+  }
+  if (ds.gone === undefined) return;
+  el.replaceWith(Object.assign(document.createElement("span"), {
+    className: ds.goneClass || "seg-gone", textContent: ds.gone }));
+}
+document.addEventListener("error", onMediaError, true);
+
 export function toast(msg, type = "ok", ms = 2600) {
   const root = $("#toast-root");
   const div = document.createElement("div");
@@ -808,9 +827,7 @@ function botCardHTML(b) {
       ${b.avatar
         ? `<img class="bot-avatar zoomable" src="${esc(b.avatar)}"
              data-zoom="${esc(b.avatar)}" alt="${esc(b.name || b.appid)}"
-             title="点击放大" loading="lazy"
-             onerror="this.replaceWith(Object.assign(document.createElement('span'),
-                      {className:'bot-avatar ph', textContent:'🤖'}))">`
+             title="点击放大" loading="lazy" data-gone="🤖" data-gone-class="bot-avatar ph">`
         : '<span class="bot-avatar ph">🤖</span>'}
       <span class="dot ${b.running ? "on" : ""}" title="${b.running ? "运行中" : "未运行"}"></span>
       <span class="bot-name">${esc(b.name || b.appid)}</span>
@@ -2041,15 +2058,14 @@ function previewHTML(p) {
   const label = { image: "图片", video: "视频", audio: "语音", file: "文件" }[p.type] || "媒体";
   if (!p.url || p.state !== "ok") return `<div class="dm-item">${GONE(label)}</div>`;
   const url = esc(p.local ? `${BASE}/api/media/${encodeURIComponent(p.local)}` : p.url);
-  const onerr = `onerror="this.replaceWith(Object.assign(document.createElement('span'),` +
-    `{className:'seg-gone',textContent:'[${label}已失效]'}))"`;
+  const gone = `data-gone="${esc(`[${label}已失效]`)}"`;   // 加载失败由 onMediaError 换占位
   if (p.type === "image") {
     return `<div class="dm-item"><img class="dm-img" src="${url}" data-zoom="${url}" alt="图片"
-      loading="lazy" referrerpolicy="no-referrer" ${onerr}></div>`;
+      loading="lazy" referrerpolicy="no-referrer" ${gone}></div>`;
   }
   if (p.type === "video") {
     return `<div class="dm-item dm-wide"><video class="dm-video" src="${url}" controls preload="metadata"
-      referrerpolicy="no-referrer" ${onerr}></video></div>`;
+      referrerpolicy="no-referrer" ${gone}></video></div>`;
   }
   if (p.type === "audio") {
     return `<div class="dm-item dm-wide"><audio controls preload="none"

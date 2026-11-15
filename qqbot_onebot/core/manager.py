@@ -18,6 +18,8 @@ from .access import AccessControl
 from .bot import BotInstance, PeerState
 from .media import MediaStore
 from .messages import MessageStore
+from .fieldwatch import FieldWatch
+from .unparsed import UnparsedLog, files as unparsed_files
 from .provision import ProvisionConfig
 from .updater import Updater
 
@@ -32,6 +34,9 @@ class BotManager:
         self.access = AccessControl(self.db)
         self.store = MessageStore(self.db)
         self.media = MediaStore(config.media_dir, config.media_ttl_hours)
+        # 全部 bot 共用: 同一新字段只记 SAMPLES 份, 不是每个 bot 各记一遍
+        self.fieldwatch = FieldWatch(self.db, UnparsedLog(
+            unparsed_files(Path(config.db_path).parent)[0]))
         self.http: aiohttp.ClientSession | None = None
         self.bots: dict[str, BotInstance] = {}
         self._cleanup_task: asyncio.Task | None = None
@@ -121,6 +126,7 @@ class BotManager:
             db=self.db, idmap=self.idmap, access=self.access,
             store=self.store, media=self.media, http=self.http,
             token_urls=self.config.token_urls, api_bases=self.config.api_bases,
+            fieldwatch=self.fieldwatch,
         )
         bot.on_fatal = (lambda reason, appid=bot.appid:
                         asyncio.create_task(self.auto_disable_bot(appid, reason)))

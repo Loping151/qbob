@@ -56,6 +56,8 @@
 标准 OneBot v11 事件, 另有:
 
 - 群消息事件总是带一个 `at` bot 的段在前(nonebot 据此判断 `to_me`); 引用消息时 `reply` 段在最前。
+- 群消息的 `sender.nickname` 是 QQ 昵称, `sender.card` 是群名片(平台 2026-11-13 起下发, 没设名片时与昵称相同);
+  `get_group_member_info` / `get_group_member_list` 的 `card` 取该成员最近一条消息里的群名片, 没有时为昵称。
 - bot 自己发的消息也会作为普通 `message` 事件下发一份(`user_id` = `self_id`), 每 bot 可关。
   发送时给的 `base64://`、本地文件在这份事件里(以及 `get_msg`)换成 QQ CDN 直链、平台签名链接或
   `media://` 引用(可原样再发), 合并转发节点里的也一样, 不回传原始 base64。
@@ -102,6 +104,9 @@ curl -s -H "Authorization: Bearer $TOKEN" -d '{"group_id": 100000000000002, "mes
 ```
 
 `kind` 为 `user` 或 `bot`(查 bot 自己时)。`union_openid` 平台目前下发为空。
+
+`avatar.data`: 该用户在群里发过言时, 优先用平台随消息下发的头像链接(`thirdqq.qlogo.cn`, 带签名、每条消息都换,
+适配器验过能打开才返回), 没有或已失效时为上面的 `q.qlogo.cn/qqapp/...`; 两者是同一张图。
 
 任意一条连接都能查任意虚拟号, `appid` 是该号所属 bot 的 AppID, 不一定是发起查询的这条连接。
 
