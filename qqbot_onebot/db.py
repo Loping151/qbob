@@ -6,12 +6,16 @@ Single writer process. All timestamps are unix seconds (int).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
 import aiosqlite
+
+logger = logging.getLogger("qqbot.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS id_map (
@@ -244,10 +248,18 @@ MIGRATIONS = [
 
 
 class Database:
+    # 写入攒批: execute/executemany 不再每条语句单独提交, 最多等 COMMIT_DELAY 秒或攒满
+    # COMMIT_MAX 条再一起提交, 消息表和它的几个索引的尾页一次写完. 同一连接上的读看得到
+    # 未提交的写; 正常关闭会先提交, 进程被强杀最多丢这段时间的写入. COMMIT_DELAY<=0 即逐条提交
+    COMMIT_DELAY = 1.0
+    COMMIT_MAX = 500
+
     def __init__(self, path: str):
         self.path = path
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
+        self._pending = 0
+        self._commit_task: asyncio.Task | None = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
@@ -260,6 +272,9 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
+        # 默认 1000 页就 checkpoint; 放到约 16MB, 两次 checkpoint 之间反复改的页只回写一次
+        await self._conn.execute("PRAGMA wal_autocheckpoint=4000")
+        await self._conn.execute("PRAGMA journal_size_limit=67108864")
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(SCHEMA)
         await self._migrate()
@@ -275,20 +290,57 @@ class Database:
                 await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     async def close(self) -> None:
+        task, self._commit_task = self._commit_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
         if self._conn is not None:
+            async with self._lock:
+                await self._commit_locked()
             await self._conn.close()
             self._conn = None
 
     async def execute(self, sql: str, args: Iterable[Any] = ()) -> aiosqlite.Cursor:
         async with self._lock:
             cur = await self.conn.execute(sql, tuple(args))
-            await self.conn.commit()
+            await self._wrote_locked()
             return cur
 
     async def executemany(self, sql: str, rows: Iterable[Iterable[Any]]) -> None:
         async with self._lock:
             await self.conn.executemany(sql, [tuple(r) for r in rows])
+            await self._wrote_locked()
+
+    async def flush(self) -> None:
+        """立即提交攒着的写入."""
+        async with self._lock:
+            await self._commit_locked()
+
+    async def _wrote_locked(self) -> None:
+        self._pending += 1
+        if self.COMMIT_DELAY <= 0 or self._pending >= self.COMMIT_MAX:
+            await self._commit_locked()
+        elif self._commit_task is None:
+            self._commit_task = asyncio.create_task(self._delayed_commit())
+
+    async def _commit_locked(self) -> None:
+        if self._pending:
+            self._pending = 0
             await self.conn.commit()
+
+    async def _delayed_commit(self) -> None:
+        try:
+            await asyncio.sleep(self.COMMIT_DELAY)
+            async with self._lock:
+                self._commit_task = None
+                await self._commit_locked()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # 提交失败时写入仍留在事务里, 下一次写入会重新安排提交
+            self._commit_task = None
+            logger.exception("deferred commit failed")
 
     async def fetchone(self, sql: str, args: Iterable[Any] = ()) -> aiosqlite.Row | None:
         cur = await self.conn.execute(sql, tuple(args))
@@ -307,6 +359,7 @@ class Database:
         import sqlite3  # noqa: PLC0415
         async with self._lock:
             try:
+                await self._commit_locked()     # VACUUM 不能在事务里跑
                 await self.conn.execute("VACUUM")
                 await self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             except sqlite3.OperationalError as exc:
