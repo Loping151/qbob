@@ -6,10 +6,75 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 from typing import Any
 
 from .faces import EMOJI_BY_CODE, NAME_EMOJI, SYSFACE_NAMES
+
+# 平台 content 里的内联标记(顶层消息与合并转发节点里都有):
+# QQ 表情: <faceType=1,faceId="5",ext="<base64 的 {"text":"..."}>">
+# faceType=6 是图片占位(faceId=附件序号), 文件已在 attachments 里, 丢掉;
+# faceId 为空的(如 faceType=4 的 [猪])没有 OneBot 表情 id, 转成 ext 里的文字
+FACE_TAG_RE = re.compile(
+    r"<faceType=(\d+),\s*faceId=\"(\d*)\"(?:,\s*ext=\"([^\"]*)\")?\s*>")
+# 富媒体的内联占位, 文件已在 attachments 里, 标记纯噪音:
+# <attachmentType="image/gif",attachmentIndex=0,description="<base64 的 {"text":..}>">
+ATTACHMENT_TAG_RE = re.compile(
+    r"<attachmentType=\"[^\"]*\"\s*,\s*attachmentIndex=\d+"
+    r"(?:\s*,\s*description=\"[^\"]*\")?\s*>")
+
+
+def split_faces(segments: list[dict]) -> list[dict]:
+    """把文本里的 <faceType=..,faceId=".."> 切成 OneBot face 段; ext 文字存为 summary."""
+    out: list[dict] = []
+    for seg in segments:
+        if seg.get("type") != "text":
+            out.append(seg)
+            continue
+        text = seg["data"].get("text", "")
+        pos = 0
+        for match in FACE_TAG_RE.finditer(text):
+            if match.start() > pos:
+                out.append({"type": "text",
+                            "data": {"text": text[pos:match.start()]}})
+            if match.group(1) == "6":
+                pos = match.end()
+                continue
+            data = {"id": match.group(2)}   # OneBot face 段只认 id
+            raw_ext = match.group(3) or ""
+            if raw_ext:
+                try:
+                    payload = json.loads(base64.b64decode(raw_ext + "==").decode("utf-8"))
+                    if payload.get("text"):
+                        data["summary"] = str(payload["text"])
+                except Exception:
+                    pass
+            if data["id"]:
+                out.append({"type": "face", "data": data})
+            elif data.get("summary"):
+                out.append({"type": "text", "data": {"text": data["summary"]}})
+            pos = match.end()
+        tail = text[pos:]
+        if tail or pos == 0:
+            out.append({"type": "text", "data": {"text": tail or text}})
+    merged: list[dict] = []
+    for s in out:
+        if s["type"] == "text":
+            if not s["data"].get("text"):
+                continue
+            if merged and merged[-1]["type"] == "text":
+                merged[-1] = {"type": "text", "data": {
+                    "text": merged[-1]["data"]["text"] + s["data"]["text"]}}
+                continue
+        merged.append(s)
+    return merged
+
+
+def inline_markup(text: str) -> list[dict]:
+    """一段平台文字 -> 段: 去掉附件占位, 表情切成 face 段(不含 @ 标记, 那个要建映射)."""
+    return split_faces([{"type": "text", "data": {"text": ATTACHMENT_TAG_RE.sub("", text)}}])
 
 
 def cq_escape(text: str, in_param: bool = False) -> str:

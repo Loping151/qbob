@@ -468,7 +468,7 @@ async function navigate() {
 let modalCleanup = null;
 
 /** 由弹窗内部注册: 关闭 / 被下一个弹窗顶掉时都会执行 */
-function onModalClose(fn) { modalCleanup = fn; }
+export function onModalClose(fn) { modalCleanup = fn; }
 
 function runModalCleanup() {
   const fn = modalCleanup;
@@ -476,7 +476,7 @@ function runModalCleanup() {
   if (fn) { try { fn(); } catch { /* ignore */ } }
 }
 
-function openModal(title, bodyHTML, { wide = false } = {}) {
+export function openModal(title, bodyHTML, { wide = false } = {}) {
   runModalCleanup(); // 直接开新弹窗时也要清掉上一个的定时器
   const root = $("#modal-root");
   root.innerHTML =
@@ -1917,11 +1917,14 @@ const SEG_LABEL = {
 };
 const segLabel = (t) => SEG_LABEL[t] || String(t || "?");
 
+/** 已经写进摘要文字的段(见 chatview.digest), 不再出徽章 */
+const SUMMARY_KINDS = new Set(["text", "face", "json", "music", "share", "markdown"]);
+
 /** 非文本段渲染成小徽章: [图片] [图片]×3 */
 function kindBadges(kinds) {
   const counts = new Map();
   for (const k of kinds || []) {
-    if (k === "text") continue;
+    if (SUMMARY_KINDS.has(k)) continue;
     counts.set(k, (counts.get(k) || 0) + 1);
   }
   if (!counts.size) return "";

@@ -26,23 +26,38 @@ MID_BLOCK = 200   # 每次预留多少个 id(减少写库次数)
 
 
 MAX_FIELD_CHARS = 512   # 单字段截断长度(base64 图片可达几 MB)
+MAX_TEXT_CHARS = 16384  # 文字类字段另算: 截成开头 32 字, get_msg / 引用回查 / 管理台就只剩开头
+# (段类型, 字段): 正文性质的字段, 不会是 base64
+_TEXT_FIELDS = frozenset({("text", "text"), ("json", "data"), ("xml", "data"),
+                          ("markdown", "content")})
 MAX_NESTED_ITEMS = 50   # 嵌套 list 保留项数
 MAX_TOTAL_CHARS = 32768  # 单条消息落库总上限
 
 
-def _shrink(value, depth: int = 0):
+def _shrink(value, depth: int = 0, limit: int = MAX_FIELD_CHARS):
     """递归截断长字符串; 须下钻 list/dict, node 段的 data.content 里也有 base64 图."""
     if isinstance(value, str):
-        if len(value) > MAX_FIELD_CHARS:
-            return f"{value[:32]}…<省略 {len(value) - 32} 字符>"
+        if len(value) > limit:
+            keep = 32 if limit == MAX_FIELD_CHARS else limit
+            return f"{value[:keep]}…<省略 {len(value) - keep} 字符>"
         return value
     if depth >= 4:                      # 防御畸形/自引用结构
         return "…"
     if isinstance(value, list):
         return [_shrink(v, depth + 1) for v in value[:MAX_NESTED_ITEMS]]
     if isinstance(value, dict):
+        if isinstance(value.get("type"), str) and isinstance(value.get("data"), dict):
+            # 嵌套的消息段(node 的 content): 同样按段类型放宽文字字段
+            return {**{k: _shrink(v, depth + 1) for k, v in value.items() if k != "data"},
+                    "data": _shrink_data(value["type"], value["data"], depth + 1)}
         return {k: _shrink(v, depth + 1) for k, v in value.items()}
     return value
+
+
+def _shrink_data(seg_type: str, data: dict, depth: int = 0) -> dict:
+    return {k: _shrink(v, depth, MAX_TEXT_CHARS if (seg_type, k) in _TEXT_FIELDS
+                       else MAX_FIELD_CHARS)
+            for k, v in data.items()}
 
 
 def sanitize_segments(segments) -> list[dict]:
@@ -50,8 +65,9 @@ def sanitize_segments(segments) -> list[dict]:
     媒体段缺 file_id 的补上: get_msg / 引用回查读的就是库里这份."""
     out: list[dict] = []
     for seg in with_file_ids([seg for seg in segments or [] if isinstance(seg, dict)]):
-        data = {k: _shrink(v) for k, v in (seg.get("data") or {}).items()}
-        out.append({"type": seg.get("type", "text"), "data": data})
+        seg_type = seg.get("type", "text")
+        out.append({"type": seg_type,
+                    "data": _shrink_data(str(seg_type), seg.get("data") or {})})
     # 兜底: 段数极多时总量仍可能超限
     encoded = json.dumps(out, ensure_ascii=False)
     if len(encoded) > MAX_TOTAL_CHARS:

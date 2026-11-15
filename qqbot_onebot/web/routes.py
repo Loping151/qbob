@@ -9,6 +9,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import re
 import secrets
 import socket
 import time
@@ -19,9 +20,33 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..core import avatars
 from ..db import insert_bot, row_to_bot
+from . import chatview
 from .auth import SESSION_COOKIE, credential_error, hash_password, require_role
 
 logger = logging.getLogger("qqbot.webapi")
+
+_LOOSE_SEG_RE = re.compile(r'\{"type": "(\w+)", "data": \{(?:"text": "((?:[^"\\]|\\.)*))?')
+
+
+def _loose_segments(raw: str) -> list[dict]:
+    """消息列表只取 content 前 2000 字, 长消息会切在半截 JSON 里: 解析失败就按段头捞出
+    类型与文字(最后一段文字可能不完整), 摘要和徽章不至于整行空掉."""
+    try:
+        segments = json.loads(raw)
+        return [s for s in segments if isinstance(s, dict)] if isinstance(segments, list) else []
+    except ValueError:
+        pass
+    out: list[dict] = []
+    for match in _LOOSE_SEG_RE.finditer(raw):
+        kind, text = match.group(1), match.group(2)
+        data: dict = {}
+        if kind == "text" and text is not None:
+            try:
+                data["text"] = json.loads(f'"{text}"')
+            except ValueError:
+                data["text"] = text
+        out.append({"type": kind, "data": data})
+    return out
 
 _AUDIO_DOWNLOAD_LIMIT = 25 * 1024 * 1024
 _AUDIO_REDIRECT_LIMIT = 3
@@ -1102,18 +1127,14 @@ def build_router() -> APIRouter:
         items = []
         for row in rows:
             record = dict(row)
-            try:
-                segments = json.loads(record.pop("content") or "[]")
-            except ValueError:
-                segments = []
-            texts, kinds = [], []
+            segments = _loose_segments(record.pop("content") or "[]")
+            # 表情/卡片进摘要; 图片、转发等由前端按 kinds 出徽章
+            record["summary"] = chatview.clip(chatview.digest(segments, media=False), 200)
+            kinds: list[str] = []
             for seg in segments:
-                kind = seg.get("type", "text")
-                kinds.append(kind)
-                if kind == "text":
-                    texts.append(str((seg.get("data") or {}).get("text", "")))
-            summary = "".join(texts).strip()
-            record["summary"] = summary[:200] + ("…" if len(summary) > 200 else "")
+                kind = str(seg.get("type", "text"))
+                if not (kind == "node" and kinds and kinds[-1] == "node"):
+                    kinds.append(kind)      # 一组 node 是一份聊天记录, 只算一个
             record["kinds"] = kinds
             record["peer_name"] = _display_name(manager, record["peer_virtual"], "")
             record["user_name"] = _display_name(manager, record["user_virtual"], "")
@@ -1243,6 +1264,8 @@ def build_router() -> APIRouter:
         has_more = len(rows) > limit
         items = []
         quoted_ids: set[int] = set()
+        name_of = _name_lookup(manager)
+        view = chatview.View(name_of)
         for row in reversed(rows[:limit]):
             try:
                 content = json.loads(row["content"] or "[]")
@@ -1254,20 +1277,12 @@ def build_router() -> APIRouter:
                 sender = {}
             uid = int(sender.get("user_id") or row["user_virtual"] or 0)
             for seg in content:
-                if not isinstance(seg, dict):
-                    continue
-                if seg.get("type") == "reply":
+                if isinstance(seg, dict) and seg.get("type") == "reply":
                     try:
                         quoted_ids.add(int((seg.get("data") or {}).get("id", 0)))
                     except (TypeError, ValueError):
                         pass
-                elif seg.get("type") == "at":
-                    # @ 目标补昵称
-                    data = seg.get("data") or {}
-                    qq = str(data.get("qq", ""))
-                    if qq and qq != "all" and not data.get("name"):
-                        data["name"] = _display_name(manager, int(qq or 0), "")
-                        seg["data"] = data
+            shown = view.segments(content, f"m{row['mid']}")
             avatar, avatar_fb = _avatar_pair(manager, uid)
             items.append({
                 "mid": row["mid"],
@@ -1278,7 +1293,9 @@ def build_router() -> APIRouter:
                 "avatar": avatar,
                 "avatar_fb": avatar_fb,
                 "role": sender.get("role", ""),
-                "content": content,
+                "content": shown,
+                # 引用这条时挂在输入框上方的那句
+                "summary": chatview.clip(chatview.digest(shown, name_of), 60),
                 "ts": row["ts"],
                 "recalled": bool(row["recalled_at"]),
                 # 无平台 id(转发子节点等)撤不了
@@ -1286,6 +1303,7 @@ def build_router() -> APIRouter:
             })
         # 被引用消息的摘要, 一次查回
         quotes = await _quote_previews(manager, quoted_ids) if quoted_ids else {}
+        await _fill_forward_previews(manager, appid, view)
         # bot 在群里的角色(决定能否撤回他人/禁言). 进会话时强刷: 提升管理员平台
         # 不推事件, 缓存会一直停在旧值; 翻页/轮询走缓存.
         bot_role = ""
@@ -1295,14 +1313,23 @@ def build_router() -> APIRouter:
                 bot_role = await live.group_role(
                     openid, force=not before and not after)
         return {"items": items, "has_more": has_more, "quotes": quotes,
+                "forwards": view.forwards,
                 "bot_role": bot_role, "peer_name": peer_name,
                 "next_before": rows[limit - 1]["mid"] if has_more and rows else 0}
+
+    def _name_lookup(manager):
+        """虚拟号 -> 已知昵称, 不认识给空串(由前端退回显示号码)."""
+        def name_of(virtual_id: int) -> str:
+            entry = manager.idmap.lookup_virtual(int(virtual_id or 0))
+            return entry.nickname if entry is not None and entry.nickname else ""
+        return name_of
 
     async def _quote_previews(manager, mids: set[int]) -> dict:
         marks = ",".join("?" * len(mids))
         rows = await manager.db.fetchall(
             f"SELECT mid, user_virtual, content, sender FROM messages"
             f" WHERE mid IN ({marks})", list(mids))
+        name_of = _name_lookup(manager)
         out: dict[str, dict] = {}
         for row in rows:
             try:
@@ -1313,29 +1340,60 @@ def build_router() -> APIRouter:
                 sender = json.loads(row["sender"] or "{}")
             except ValueError:
                 sender = {}
-            texts, kinds = [], []
-            for seg in content:
-                if not isinstance(seg, dict):
-                    continue
-                kind = seg.get("type", "text")
-                if kind == "text":
-                    texts.append(str((seg.get("data") or {}).get("text", "")))
-                elif kind == "face":
-                    texts.append(str((seg.get("data") or {}).get("summary", "[表情]")))
-                else:
-                    kinds.append(kind)
-            summary = "".join(texts).strip()
-            if not summary and kinds:
-                label = {"image": "图片", "video": "视频", "record": "语音",
-                         "file": "文件", "forward": "聊天记录"}
-                summary = f"[{label.get(kinds[0], kinds[0])}]"
             uid = int(sender.get("user_id") or row["user_virtual"] or 0)
             out[str(row["mid"])] = {
                 "nickname": (sender.get("card") or sender.get("nickname")
                              or _display_name(manager, uid, "")),
-                "summary": summary[:60] + ("…" if len(summary) > 60 else ""),
+                "summary": chatview.clip(chatview.digest(content, name_of), 60),
             }
         return out
+
+    # 入站合并转发的预览(条数 + 前几条): 内容收到后不再变, 按 id 缓存, 免得每次轮询都解析大段节点
+    _forward_previews: dict[tuple[str, str], dict] = {}
+    FORWARD_PREVIEW_CACHE = 512
+
+    async def _fill_forward_previews(manager, appid: str, view: chatview.View) -> None:
+        """把 view 里登记的入站 forward id 换成预览; 已清理(forwards 表只留 7 天)的标 gone."""
+        missing = [fid for fid in view.pending if (appid, fid) not in _forward_previews]
+        if missing:
+            marks = ",".join("?" * len(missing))
+            rows = await manager.db.fetchall(
+                f"SELECT id, nodes FROM forwards WHERE bot_appid=? AND id IN ({marks})",
+                [appid, *missing])
+            found = {row["id"]: row["nodes"] for row in rows}
+            if len(_forward_previews) + len(missing) > FORWARD_PREVIEW_CACHE:
+                _forward_previews.clear()
+            for fid in missing:
+                if fid not in found:
+                    view.forwards[fid] = {"count": 0, "lines": [], "gone": True}
+                    continue          # 不缓存: 万一稍后才入库
+                try:
+                    raw = json.loads(found[fid] or "[]")
+                except ValueError:
+                    raw = []
+                nodes = chatview.View(_name_lookup(manager)).nodes(raw, fid)
+                _forward_previews[(appid, fid)] = chatview.preview(nodes)
+        for fid in view.pending:
+            if (appid, fid) in _forward_previews:
+                view.forwards[fid] = dict(_forward_previews[(appid, fid)])
+
+    @router.get("/chat/forward")
+    async def chat_forward(request: Request, appid: str, id: str,
+                           session: dict = require_role("advanced")):
+        """点开入站的聊天记录: 全部节点(已整理成气泡能画的形状)."""
+        manager = request.app.state.manager
+        row = await manager.db.fetchone(
+            "SELECT nodes FROM forwards WHERE id=? AND bot_appid=?", (id, appid))
+        if row is None:
+            raise HTTPException(status_code=404, detail="这份聊天记录已经清理")
+        try:
+            raw = json.loads(row["nodes"] or "[]")
+        except ValueError:
+            raw = []
+        view = chatview.View(_name_lookup(manager))
+        nodes = view.nodes(raw, id)
+        await _fill_forward_previews(manager, appid, view)
+        return {"nodes": nodes, "forwards": view.forwards}
 
     @router.post("/chat/send")
     async def chat_send(request: Request, session: dict = require_role("advanced")):

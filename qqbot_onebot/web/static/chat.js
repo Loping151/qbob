@@ -1,6 +1,7 @@
 // 聊天室页: 从 app.js 动态 import 进来(体量大, 不进首屏包)
 import { BASE, api, esc, toast, debounce, $, LIST_LOADING_HTML,
-         viewSignal, onViewLeave, relTime, openLightbox, closeLightbox }
+         viewSignal, onViewLeave, relTime, openLightbox, closeLightbox,
+         openModal, onModalClose }
   from './app.js';
 
 // ==================== 聊天室 ====================
@@ -29,6 +30,7 @@ function loadChatPick() {
 const chatState = {
   appid: "", chatType: "", peerId: 0, peerName: "",
   oldest: 0, newest: 0, hasMore: false, loading: false, quotes: {},
+  forwards: {},          // 聊天记录卡片: id -> {count, lines, nodes?, gone?}(见 chatview.py)
   botRole: "",   // bot 在当前群的角色: admin/owner 才给撤回别人和禁言
   mdEnabled: true,       // 当前 bot 是否开了 markdown(决定气泡渲不渲染)
   pending: [],           // 待发送的附件 {url, name, kind}
@@ -182,7 +184,7 @@ async function openConversation(chatType, peerId, name) {
   Object.assign(chatState, {
     chatType, peerId, peerName: name,
     oldest: 0, newest: 0, hasMore: false, pending: [], quotes: {},
-    replyTo: null,
+    forwards: {}, replyTo: null,
   });
   saveChatPick();
   document.querySelectorAll(".peer-row").forEach((el) =>
@@ -255,6 +257,7 @@ async function loadMessages({ initial = false, before = 0 } = {}) {
     const res = await api(`${BASE}/api/chat/messages?${params}`, { signal: viewSignal() });
     if (!log || !document.body.contains(log)) return;
     Object.assign(chatState.quotes, res?.quotes || {});
+    mergeForwards(res?.forwards);
     const items = res?.items || [];
     chatState.hasMore = !!res?.has_more;
     if (res?.bot_role !== undefined) chatState.botRole = res.bot_role || "";
@@ -452,20 +455,15 @@ function onChatContextMenu(e) {
   ctxMenuEl.style.top = `${Math.min(e.clientY, innerHeight - rect.height - 8)}px`;
 }
 
-/** 引用某条消息: 摘一句摘要挂到输入框上方, 发送时作为 reply 段带出去 */
+/** 引用某条消息: 摘一句摘要挂到输入框上方, 发送时作为 reply 段带出去.
+ *  摘要用后端给的(data-sum): 卡片/表情/聊天记录的 textContent 读起来不是一句话 */
 function pickReply(btn) {
   const row = btn.closest(".bub-row");
-  const bubble = row?.querySelector(".bub");
-  // 图片/语音这类没有文字, textContent 是空的 —— 按里面有什么给个标签
-  const kind = bubble?.querySelector("img") ? "[图片]"
-    : bubble?.querySelector("video") ? "[视频]"
-      : bubble?.querySelector("audio") ? "[语音]" : "";
-  const text = (bubble?.textContent || "").trim();
   chatState.replyTo = {
     mid: Number(btn.dataset.replyTo),
     nickname: row?.querySelector(".bub-name")?.textContent
       || (row?.classList.contains("mine") ? "我" : ""),
-    summary: (text || kind).slice(0, 60),
+    summary: row?.dataset.sum || "",
   };
   renderReplyTo();
   $("#chat-input")?.focus();
@@ -489,6 +487,8 @@ function renderReplyTo() {
 
 /** 引用 / 撤回 / 禁言 */
 async function onBubbleAction(e) {
+  const fwd = e.target.closest("[data-fwd]");
+  if (fwd) { openForward(fwd.dataset.fwd); return; }
   const quote = e.target.closest("[data-reply-to]");
   if (quote) { pickReply(quote); return; }
   const recall = e.target.closest("[data-recall]");
@@ -566,6 +566,7 @@ async function pollNewMessages() {
     });
     const res = await api(`${BASE}/api/chat/messages?${params}`, { signal: viewSignal() });
     Object.assign(chatState.quotes, res?.quotes || {});
+    mergeForwards(res?.forwards);
     // 已在 DOM 里的不重复渲染(并发轮询/整页重拉与增量交错都可能重复)
     const items = (res?.items || []).filter(
       (m) => m.mid > chatState.newest
@@ -608,7 +609,8 @@ function bubbleHTML(m) {
     ? `<img class="bub-ava" src="${esc(m.avatar)}"${fb} data-gone="${avatarChar(name)}"
          data-gone-class="bub-ava ph" alt="" loading="lazy" referrerpolicy="no-referrer">`
     : `<span class="bub-ava ph">${avatarChar(name)}</span>`;
-  return `<div class="bub-row ${mine ? "mine" : ""}" data-mid="${m.mid}">
+  return `<div class="bub-row ${mine ? "mine" : ""}" data-mid="${m.mid}"
+    data-sum="${esc(m.summary || "")}">
     ${avatar}
     <div class="bub-col">
       <div class="bub-meta">${mine ? roleTag : `<span class="bub-name">${esc(name)}</span>${roleTag}`}
@@ -651,13 +653,15 @@ function fmtTime(ts) {
   return new Date((ts || 0) * 1000).toLocaleString();
 }
 
-/** OneBot 段数组 -> 气泡内容 HTML.
+/** OneBot 段数组 -> 气泡内容 HTML. 段已由后端整理过(chatview.py): face 带 name/emoji,
+ *  卡片类带 card, 连续的 node 已并成一个 forward 段.
  *  md: 这条文字会不会被当 markdown 发出去(出站 + bot 开了 markdown)
  */
 function segmentsHTML(segments, md = false) {
   const parts = [];
-  for (const seg of segments || []) {
-    if (!seg || typeof seg !== "object") continue;
+  const segs = (segments || []).filter((seg) => seg && typeof seg === "object");
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
     const d = seg.data || {};
     switch (seg.type) {
       case "text": {
@@ -665,6 +669,7 @@ function segmentsHTML(segments, md = false) {
         parts.push(md && looksLikeMarkdown(text)
           ? `<div class="seg-md">${renderMarkdown(text)}</div>`
           : `<span class="seg-text">${linkify(text)}</span>`);
+        if (d.cut) parts.push(`<span class="seg-gone">…（原文 ${Number(d.cut)} 字，入库时截断）</span>`);
         break;
       }
       case "image":
@@ -703,7 +708,7 @@ function segmentsHTML(segments, md = false) {
         break;
       }
       case "at":
-        parts.push(`<span class="seg-at">@${esc(d.name || d.qq || "")}</span>`);
+        parts.push(`<span class="seg-at">@${esc(d.qq === "all" ? "全体成员" : d.name || d.qq || "")}</span>`);
         break;
       case "reply": {
         const q = chatState.quotes[String(d.id || "")];
@@ -713,23 +718,139 @@ function segmentsHTML(segments, md = false) {
           : `<span class="seg-quote gone" data-reply="${esc(d.id || "")}">引用的消息不在记录里</span>`);
         break;
       }
-      case "face":
-        // 平台在 ext 里给了可读文案(如 [睡觉]), 别丢
-        parts.push(`<span class="seg-face">${esc(d.summary || "[表情]")}</span>`);
+      case "face": {
+        // 连续同一个表情并成一个 + ×N(刷屏的一排「流泪」一眼看完)
+        let n = 1;
+        while (i + n < segs.length && segs[i + n].type === "face"
+               && String(segs[i + n].data?.id) === String(d.id)
+               && segs[i + n].data?.name === d.name) n++;
+        i += n - 1;
+        parts.push(faceHTML(d, n));
         break;
+      }
       case "forward":
       case "node":
-        parts.push('<span class="seg-gone">[聊天记录]</span>');
+        parts.push(forwardCardHTML(String(d.id || "")));
         break;
       case "json":
+      case "music":
+      case "share":
+        parts.push(d.card ? cardHTML(d.card)
+          : `<span class="seg-gone">[${seg.type === "music" ? "音乐" : "卡片"}]</span>`);
+        break;
       case "xml":
         parts.push('<span class="seg-gone">[卡片]</span>');
+        break;
+      case "markdown":
+        parts.push(`<div class="seg-md">${renderMarkdown(String(d.content || ""))}</div>`);
+        break;
+      case "keyboard":
+        parts.push('<span class="seg-gone">[按钮]</span>');
         break;
       default:
         parts.push(`<span class="seg-gone">[${esc(seg.type)}]</span>`);
     }
   }
   return parts.join("") || '<span class="seg-gone">(空消息)</span>';
+}
+
+/** QQ 表情: 有 emoji 替身用替身, 没有显示 [名字]; n>1 时带 ×n. 悬停看名字 */
+function faceHTML(d, n = 1) {
+  const name = String(d.name || "表情");
+  const times = n > 1 ? `<span class="seg-face-n">×${n}</span>` : "";
+  return d.emoji
+    ? `<span class="seg-face emo" title="${esc(name)}">${esc(d.emoji)}${times}</span>`
+    : `<span class="seg-face" title="${esc(name)}">[${esc(name)}]${times}</span>`;
+}
+
+/** ARK / 音乐 / 分享卡片: 有链接整张可点; 图片挂了直接隐藏(data-gone 空串) */
+function cardHTML(c) {
+  const img = (url, cls) => (url
+    ? `<img class="${cls}" src="${esc(url)}" alt="" loading="lazy" referrerpolicy="no-referrer"
+         data-gone="" data-gone-class="sc-gone">` : "");
+  const inner = `${img(c.image, "sc-img")}<span class="sc-body">`
+    + `<span class="sc-title">${esc(c.title || c.label || "卡片")}</span>`
+    + (c.desc ? `<span class="sc-desc">${esc(c.desc)}</span>` : "")
+    + `<span class="sc-foot">${img(c.icon, "sc-icon")}`
+    + `<span>${esc(c.source || c.label || "卡片")}</span></span></span>`;
+  return c.url
+    ? `<a class="seg-card" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer"
+         title="${esc(c.url)}">${inner}</a>`
+    : `<span class="seg-card">${inner}</span>`;
+}
+
+/** 聊天记录卡片: 前几条预览 + 条数, 点开看全部(openForward) */
+function forwardCardHTML(id) {
+  const f = chatState.forwards[id];
+  if (!f || f.gone) {
+    return '<span class="seg-fwd gone"><span class="fwd-title">聊天记录</span>'
+      + '<span class="fwd-foot">内容已不在库里</span></span>';
+  }
+  const lines = (f.lines || []).map((l) =>
+    `<span class="fwd-line"><b>${esc(l.name)}</b>：${esc(l.text)}</span>`).join("");
+  return `<button type="button" class="seg-fwd" data-fwd="${esc(id)}">`
+    + `<span class="fwd-title">聊天记录</span>${lines}`
+    + `<span class="fwd-foot">查看 ${Number(f.count) || 0} 条转发消息</span></button>`;
+}
+
+/** 轮询会反复带回同一批预览; 已经点开取过的节点别被冲掉 */
+function mergeForwards(map) {
+  for (const [id, f] of Object.entries(map || {})) {
+    const had = chatState.forwards[id];
+    chatState.forwards[id] = { ...f, nodes: f.nodes || had?.nodes };
+  }
+}
+
+/** 打开聊天记录. 嵌套的在同一个弹窗里往下钻, 顶上给「返回上一层」 */
+let fwdTrail = [];
+async function openForward(id, { nested = false } = {}) {
+  const f = chatState.forwards[id];
+  if (!f || f.gone) return;
+  const trail = nested ? [...fwdTrail, id] : [id];
+  // openModal 会先跑上一个弹窗的清理(清空 fwdTrail), 所以先算好再赋值
+  const modal = openModal("聊天记录", `<div class="fwd-view">${LIST_LOADING_HTML}</div>`,
+                          { wide: true });
+  fwdTrail = trail;
+  onModalClose(() => { fwdTrail = []; });
+  const box = modal.querySelector(".fwd-view");
+  box.addEventListener("click", onForwardViewClick);
+  if (!f.nodes) {
+    try {
+      const res = await api(`${BASE}/api/chat/forward?${new URLSearchParams({
+        appid: chatState.appid, id })}`);
+      mergeForwards(res?.forwards);
+      f.nodes = res?.nodes || [];
+    } catch (e) {
+      if (document.body.contains(box)) {
+        box.innerHTML = `<div class="chat-empty small">加载失败: ${esc(e.message)}</div>`;
+      }
+      return;
+    }
+  }
+  if (!document.body.contains(box)) return;     // 期间弹窗被关了
+  box.innerHTML = forwardViewHTML(f.nodes);
+}
+
+function forwardViewHTML(nodes) {
+  const back = fwdTrail.length > 1
+    ? '<button type="button" class="btn small ghost fwd-back" data-fwd-back>‹ 返回上一层</button>' : "";
+  const rows = (nodes || []).map((n) => `<div class="fwd-node">
+      <span class="bub-ava ph">${avatarChar(n.name)}</span>
+      <div class="bub-col"><div class="bub-meta"><span class="bub-name">${esc(n.name)}</span></div>
+        <div class="bub">${segmentsHTML(n.content)}</div></div>
+    </div>`).join("");
+  return back + (rows || '<div class="chat-empty small">这份聊天记录是空的</div>');
+}
+
+function onForwardViewClick(e) {
+  if (e.target.closest("[data-fwd-back]")) {
+    const parent = fwdTrail[fwdTrail.length - 2];
+    fwdTrail = fwdTrail.slice(0, -2);
+    openForward(parent, { nested: fwdTrail.length > 0 });
+    return;
+  }
+  const card = e.target.closest("[data-fwd]");
+  if (card) openForward(card.dataset.fwd, { nested: true });
 }
 
 // ==================== markdown ====================

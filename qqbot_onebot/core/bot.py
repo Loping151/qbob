@@ -33,6 +33,7 @@ from ..db import Database
 from ..idmap import IdMap
 from ..qq.api import QQApiClient, QQApiError
 from ..onebot import events as ob_events
+from ..onebot.segments import ATTACHMENT_TAG_RE, inline_markup, split_faces
 from ..plugin import HookContext, registry as plugins
 from .access import AccessControl
 from .builtin import BuiltinCommands, match_builtin
@@ -100,17 +101,7 @@ _AT_TAG_RE = re.compile(
 )
 # openid 是定长十六进制串; 不像 openid 的 at 目标不建映射, 免得造出假用户
 _OPENID_RE = re.compile(r"^[0-9A-Fa-f]{16,64}$")
-# QQ 表情: <faceType=1,faceId="5",ext="<base64 的 {"text":"..."}>">
-# faceType=6 是图片占位(faceId=附件序号), 文件已在 attachments 里, 丢掉;
-# faceId 为空的(如 faceType=4 的 [猪])没有 OneBot 表情 id, 转成 ext 里的文字
-_FACE_TAG_RE = re.compile(
-    r"<faceType=(\d+),\s*faceId=\"(\d*)\"(?:,\s*ext=\"([^\"]*)\")?\s*>")
 _AT_ALL_TOKENS = {"everyone", "all", "全体成员"}
-# 富媒体在 content 里的内联占位, 文件已在 attachments 里, 标记纯噪音:
-# <attachmentType="image/gif",attachmentIndex=0,description="<base64 的 {"text":..}>">
-_ATTACHMENT_TAG_RE = re.compile(
-    r"<attachmentType=\"[^\"]*\"\s*,\s*attachmentIndex=\d+"
-    r"(?:\s*,\s*description=\"[^\"]*\")?\s*>")
 
 # 引用"本身就是引用"的消息时, 平台不给 msg_elements, 而是把链路渲染成纯文本
 # 塞进 content, idx 为一次性 TMP_<uuid>:
@@ -901,7 +892,7 @@ class BotInstance:
 
         GROUP_MESSAGE_CREATE 的 content 原样保留 at 标记; @ 消息已被剥掉 @bot 前缀.
         """
-        text = _ATTACHMENT_TAG_RE.sub("", text)
+        text = ATTACHMENT_TAG_RE.sub("", text)
         segments: list[dict] = []
         at_me = False
         pos = 0
@@ -931,53 +922,8 @@ class BotInstance:
             segments.append({"type": "text", "data": {"text": tail}})
         return self._split_faces(segments), at_me
 
-    @staticmethod
-    def _split_faces(segments: list[dict]) -> list[dict]:
-        """把文本里的 <faceType=..,faceId=".."> 切成 OneBot face 段; ext 文字存为 summary."""
-        out: list[dict] = []
-        for seg in segments:
-            if seg.get("type") != "text":
-                out.append(seg)
-                continue
-            text = seg["data"].get("text", "")
-            pos = 0
-            for match in _FACE_TAG_RE.finditer(text):
-                if match.start() > pos:
-                    out.append({"type": "text",
-                                "data": {"text": text[pos:match.start()]}})
-                if match.group(1) == "6":
-                    pos = match.end()
-                    continue
-                data = {"id": match.group(2)}   # OneBot face 段只认 id
-                raw_ext = match.group(3) or ""
-                if raw_ext:
-                    try:
-                        import base64 as _b64  # noqa: PLC0415
-                        payload = json.loads(
-                            _b64.b64decode(raw_ext + "==").decode("utf-8"))
-                        if payload.get("text"):
-                            data["summary"] = str(payload["text"])
-                    except Exception:
-                        pass
-                if data["id"]:
-                    out.append({"type": "face", "data": data})
-                elif data.get("summary"):
-                    out.append({"type": "text", "data": {"text": data["summary"]}})
-                pos = match.end()
-            tail = text[pos:]
-            if tail or pos == 0:
-                out.append({"type": "text", "data": {"text": tail or text}})
-        merged: list[dict] = []
-        for s in out:
-            if s["type"] == "text":
-                if not s["data"].get("text"):
-                    continue
-                if merged and merged[-1]["type"] == "text":
-                    merged[-1] = {"type": "text", "data": {
-                        "text": merged[-1]["data"]["text"] + s["data"]["text"]}}
-                    continue
-            merged.append(s)
-        return merged
+    # 内联表情标记切段(合并转发的节点也要用, 故在 segments.py)
+    _split_faces = staticmethod(split_faces)
 
     def _note_rkey(self, url: str) -> None:
         """记下入站直链里的 rkey 给转发网页用(见 cdnkeys); 落盘限一分钟一次."""
@@ -1052,7 +998,8 @@ class BotInstance:
         if isinstance(text, dict):
             text = text.get("content") or text.get("text") or ""
         if text:
-            segments.append({"type": "text", "data": {"text": str(text)}})
+            # 与顶层消息同样带内联的表情/附件标记
+            segments.extend(inline_markup(str(text)))
         # 媒体在 attachments 数组里
         segments.extend(await self._attachments_to_segments(element))
         # 兼容可能的扁平形状
@@ -1084,8 +1031,7 @@ class BotInstance:
             sender = _FWD_SENDER_RE.search(block)
             body = _FWD_BODY_RE.search(block)
             if body and body.group(1).strip():
-                segments.append({"type": "text",
-                                 "data": {"text": body.group(1).strip()}})
+                segments.extend(inline_markup(body.group(1).strip()))
             for match in _FWD_ATTACH_RE.finditer(block):
                 kind, filename, _size, url = (match.group(1), match.group(2),
                                               match.group(4), match.group(5))

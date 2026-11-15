@@ -924,8 +924,67 @@ body.lb-open-lock { overflow: hidden; }
   padding: 0 4px; border-radius: 4px; border: 1px solid var(--border);
 }
 .seg-at { color: var(--accent); font-weight: 500; }
-.seg-face, .seg-gone { color: var(--muted); font-size: 12.5px; }
-.seg-gone { font-style: italic; }
+.seg-gone { color: var(--muted); font-size: 12.5px; font-style: italic; }
+/* QQ 表情: 有 emoji 替身的直接显示, 没有的 [名字] 小标签; 连续相同的带 ×N */
+.seg-face {
+  display: inline-block; margin: 0 1px; padding: 0 4px; border-radius: 5px;
+  background: var(--panel); border: 1px solid var(--border);
+  color: var(--muted); font-size: 12px; line-height: 1.55; white-space: nowrap;
+}
+.seg-face.emo {
+  padding: 0; border: none; background: none; color: inherit; font-size: 17px; line-height: 1.3;
+}
+.seg-face-n { margin-left: 1px; font-size: 11.5px; color: var(--muted); }
+
+/* 卡片(ARK / 音乐 / 分享) 与聊天记录: 气泡是 pre-wrap, 这里换回 normal */
+.seg-card, .seg-fwd {
+  display: flex; width: 260px; max-width: 100%; margin: 3px 0;
+  border-radius: 9px; background: var(--panel); border: 1px solid var(--border);
+  white-space: normal; text-decoration: none; color: var(--text); overflow: hidden;
+}
+.seg-card { flex-direction: column; }
+a.seg-card:hover, .seg-fwd:not(.gone):hover { border-color: var(--accent); }
+.sc-img { display: block; width: 100%; max-height: 150px; object-fit: cover; }
+.sc-body { display: flex; flex-direction: column; gap: 2px; padding: 7px 10px 6px; min-width: 0; }
+.sc-title {
+  font-weight: 600; font-size: 13px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.sc-desc {
+  color: var(--muted); font-size: 12px; line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.sc-foot {
+  display: flex; align-items: center; gap: 5px; margin-top: 3px; padding-top: 5px;
+  border-top: 1px solid var(--border); color: var(--muted); font-size: 11px;
+}
+.sc-icon { width: 14px; height: 14px; border-radius: 3px; object-fit: cover; }
+.sc-gone { display: none; }
+.seg-fwd {
+  flex-direction: column; gap: 1px; padding: 7px 10px 6px;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.seg-fwd.gone { cursor: default; }
+.fwd-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+.fwd-line {
+  color: var(--muted); font-size: 12px; line-height: 1.5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 昵称可能带不成对的方向控制符(实收一例含 U+2067 RLI 与 U+202D LRO): 行内元素的 isolate
+   会被它吃掉, 只有 inline-block 自成一段才关得住, 否则冒号和后半句被挤到行尾 */
+.fwd-line b {
+  display: inline-block; max-width: 45%; vertical-align: bottom; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fwd-foot {
+  margin-top: 4px; padding-top: 5px; border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 11px;
+}
+/* 聊天记录弹窗: 每条一行气泡, 与聊天室同一套外观 */
+.fwd-view { display: flex; flex-direction: column; gap: 12px; }
+.fwd-node { display: flex; gap: 9px; align-items: flex-start; }
+.fwd-node .bub-col { max-width: calc(100% - 44px); }
+.fwd-back { align-self: flex-start; }
 
 /* 渲染后的 markdown 已自行断行, 换回 normal, 否则缩进都变成多余空行 */
 .seg-md { white-space: normal; }
@@ -1064,7 +1123,11 @@ body.lb-open-lock { overflow: hidden; }
   white-space: normal; overflow-wrap: anywhere;
 }
 .seg-quote:hover { background: var(--accent-weak); }
-.seg-quote b { color: var(--text); margin-right: 6px; font-weight: 600; }
+.seg-quote b {
+  color: var(--text); margin-right: 6px; font-weight: 600;
+  display: inline-block; max-width: 45%; vertical-align: bottom;   /* 同 .fwd-line b */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .seg-quote.gone { border-left-color: var(--border); cursor: default; font-style: italic; }
 .seg-quote.gone:hover { background: var(--panel); }
 /* 跳转命中时闪一下, 好定位 */
