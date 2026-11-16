@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS group_members (
     card         TEXT NOT NULL DEFAULT '',     -- 群名片(author.member_nickname)
     PRIMARY KEY (bot_appid, group_openid, user_openid)
 );
--- 按 last_seen 清理早已退群的成员(这张表原本只减不增靠成员退群事件)
+-- 按 last_seen 清理早已退群的成员(退群事件收不全, 光靠它删不干净)
 CREATE INDEX IF NOT EXISTS idx_members_seen ON group_members (last_seen);
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -242,7 +242,7 @@ MIGRATIONS = [
      "passthrough_webhooks TEXT NOT NULL DEFAULT '[]'"),
     # 引用按内容找回时比对: 转发转网页等改写后, content 记的是原消息
     ("messages", "sent_text", "sent_text TEXT NOT NULL DEFAULT ''"),
-    # 2026-11-13 起群消息 author 带 member_nickname(群名片) 与 avatar(头像链接)
+    # 群消息 author 的 member_nickname(群名片) 与 avatar(头像链接)
     ("group_members", "card", "card TEXT NOT NULL DEFAULT ''"),
     ("id_map", "avatar", "avatar TEXT NOT NULL DEFAULT ''"),
 ]
@@ -252,7 +252,7 @@ DROPPED_INDEXES = ("idx_msg_qqid",)
 
 
 class Database:
-    # 写入攒批: execute/executemany 不再每条语句单独提交, 最多等 COMMIT_DELAY 秒或攒满
+    # 写入攒批: execute/executemany 不逐条提交, 最多等 COMMIT_DELAY 秒或攒满
     # COMMIT_MAX 条再一起提交, 消息表和它的几个索引的尾页一次写完. 同一连接上的读看得到
     # 未提交的写; 正常关闭会先提交, 进程被强杀最多丢这段时间的写入. COMMIT_DELAY<=0 即逐条提交.
     # 消息约 1 条/秒时 1 秒窗口一批只有 2 条左右, 3 秒能让热页(消息表尾页/时间索引/活跃会话)多合并几次

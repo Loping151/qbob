@@ -77,6 +77,41 @@ def inline_markup(text: str) -> list[dict]:
     return split_faces([{"type": "text", "data": {"text": ATTACHMENT_TAG_RE.sub("", text)}}])
 
 
+# 群名 / 昵称 / 群名片里的小表情, QQ 客户端显示成图标:
+# <$X>           X 的码点就是系统表情 id(如 <$²> = 178 斜眼笑)
+# <$ÿĀXY> <$ǿĀXY>  名称专用小表情, 图案由 XY 定(首字 ÿ/ǿ 两种写法同一图案)
+_NAME_FACE_RE = re.compile(r"<\$(?:[ÿǿ]Ā(..?)|(.))>", re.S)
+# XY -> (名字, 视觉替身); 名字取自网上流传的代码表, 替身挑不出的留空
+NAME_EMOTICONS = {
+    "\x11\x10": ("可爱的手掌", "🖐️"), "\x11V": ("手掌比心", "🫶"), "B ": ("四叶草", "🍀"),
+    " \x0e": ("尬笑兔", "🐰"), "?V": ("爱心小熊", "🧸"), "&\x02": ("吃力小飞猪", "🐷"),
+    "&\x17": ("惊喜小飞猪", "🐷"), "&\x05": ("可爱小飞猪", "🐷"), "&\x1e": ("恶魔", "😈"),
+    "D ": ("疑问", "❓"), "D#": ("坏坏熊", "🐻"), "\x1f\x07": ("不约", "🙅"),
+    "F\x13": ("爱心", "❤️"), "\x15 ": ("小黑", ""), "C\x16": ("可爱猫爪", "🐾"),
+    "D\x0e": ("变色钻石", "💎"),
+}
+_NAME_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _name_face(match: re.Match) -> str:
+    code, single = match.group(1), match.group(2)
+    if code is not None:
+        name, emoji = NAME_EMOTICONS.get(code, ("", ""))
+    else:
+        name = SYSFACE_NAMES.get(str(ord(single)), "")
+        emoji = NAME_EMOJI.get(name, "")
+    return emoji or (f"[{name}]" if name else "[表情]")
+
+
+def clean_name(text: str) -> str:
+    """群名/昵称/群名片: 小表情换成 emoji 或 [名字], 认不出的写 [表情]; 去掉控制字符."""
+    if not text:
+        return text
+    if "<$" in text:
+        text = _NAME_FACE_RE.sub(_name_face, text)
+    return _NAME_CTRL_RE.sub(lambda m: " " if m.group() in "\t\n\r" else "", text)
+
+
 def cq_escape(text: str, in_param: bool = False) -> str:
     text = text.replace("&", "&amp;").replace("[", "&#91;").replace("]", "&#93;")
     if in_param:

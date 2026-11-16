@@ -81,6 +81,11 @@ async def cmd_info(ctx: CommandContext) -> bool:
         group_virtual = await bot.virtual_for_peer("group", ctx.peer_openid)
         lines.extend(await _group_profile_lines(ctx))
     lines.append(f"用户ID: {ctx.user_virtual}")
+    if ctx.chat_type == "private":
+        profile = await bot.user_profile(ctx.peer_openid, force=True)
+        if profile is not None and isinstance(profile.get("allow_proactive_msg"), bool):
+            lines.append("主动消息: "
+                         + ("已开通" if profile["allow_proactive_msg"] else "未开通"))
     if ctx.chat_type == "group":
         lines.append(f"角色: {role_label(ctx.member_role)}")
         # 强制刷新(受 30s/群 节流)

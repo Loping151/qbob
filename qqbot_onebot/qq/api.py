@@ -15,6 +15,8 @@ from typing import Any
 
 import aiohttp
 
+from ..onebot.segments import clean_name
+
 logger = logging.getLogger("qqbot.api")
 
 
@@ -87,6 +89,7 @@ class QQApiClient:
         self.rl_upload = RateLimiter(45, "files")
         self.rl_prepare = RateLimiter(9, "upload_prepare")
         self.rl_part = RateLimiter(9, "upload_part_finish")
+        self.rl_user_info = RateLimiter(9, "user_info")
 
     # ---------------- token ----------------
 
@@ -328,6 +331,17 @@ class QQApiClient:
         group_openid, group_name, group_finger_memo, group_class_text,
         group_tags[], group_member_num."""
         data = await self.request("GET", f"/v2/groups/{group_openid}/info")
+        if isinstance(data.get("data"), dict):
+            data = data["data"]
+        if isinstance(data.get("group_name"), str):
+            data["group_name"] = clean_name(data["group_name"])
+        return data
+
+    async def user_info(self, user_openid: str) -> dict:
+        """GET /v2/users/{user_openid}/info -> username, avatar, allow_proactive_msg,
+        union_openid. 只答私聊联系人, 别的用户报 11292 或 40184001."""
+        await self.rl_user_info.acquire()
+        data = await self.request("GET", f"/v2/users/{user_openid}/info")
         if isinstance(data.get("data"), dict):
             data = data["data"]
         return data

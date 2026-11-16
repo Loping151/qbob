@@ -357,6 +357,21 @@ async def get_login_info(bot: "BotInstance", params: dict) -> dict:
     return ok({"user_id": bot.self_id, "nickname": bot.name})
 
 
+def _owner_bot(bot: "BotInstance", appid: str) -> "BotInstance | None":
+    """虚拟号所属 appid 的 bot(openid 只在它自己的 appid 下有效); 没在跑回 None."""
+    if appid == bot.appid:
+        return bot
+    manager = getattr(bot, "manager", None)
+    return manager.get_bot(appid) if manager is not None else None
+
+
+async def _refresh_profile(bot: "BotInstance", entry, force: bool = False) -> None:
+    """私聊联系人按用户资料接口更新昵称/头像(写回 entry); 别的用户不变."""
+    owner = _owner_bot(bot, entry.bot_appid)
+    if owner is not None and entry.kind == "user":
+        await owner.user_profile(entry.openid, force=force)
+
+
 @action("get_stranger_info")
 async def get_stranger_info(bot: "BotInstance", params: dict) -> dict:
     virtual = _int_of(params.get("user_id"))
@@ -367,7 +382,8 @@ async def get_stranger_info(bot: "BotInstance", params: dict) -> dict:
     entry = bot.idmap.lookup_virtual(virtual)
     if entry is None or entry.kind != "user":
         return failed(1404, f"unknown user_id {virtual}")
-    # TODO(qq-official): 无用户资料接口, city/area 等扩展字段恒为空
+    await _refresh_profile(bot, entry, _no_cache(params))
+    # 平台的用户资料只有昵称与头像, 性别/年龄/地区等恒为空
     return ok({"user_id": virtual, "nickname": entry.nickname, "sex": "unknown",
                "age": 0, "qid": "", "level": 0, "login_days": 0,
                "city": "", "area": "", "province": "", "country": ""})
@@ -497,8 +513,8 @@ async def get_group_member_info(bot: "BotInstance", params: dict) -> dict:
     nickname = (row["nickname"] if row else "") or (entry.nickname if entry else "")
     role = (row["role"] if row else "") or "member"
     last_seen = row["last_seen"] if row else 0
-    # TODO(qq-official): 无成员详情接口, 数据来自消息缓存; 群名片取最近一条消息的
-    # member_nickname(2026-11-13 起下发), 之后没再发言的成员退回昵称
+    # TODO(qq-official): 成员详情接口没开权限(11253), 数据来自消息缓存; 群名片取最近
+    # 一条消息的 member_nickname, 没带过名片的成员退回昵称
     return ok(_member_dict(group_virtual, virtual, nickname,
                            (row["card"] if row else "") or nickname, role, 0,
                            last_sent=last_seen))
@@ -957,10 +973,11 @@ async def get_additional_user_detail(bot: "BotInstance", params: dict) -> dict:
         appid, openid, nickname, kind = bot.appid, bot.appid, bot.name, "bot"
     else:
         # id 映射全实例共用: 虚拟号属于哪个 appid 都能答, 头像按它自己的 appid 拼。
-        # 后端不必知道该问哪条连接(以前只答本 appid 的号, 后端要逐条试)
+        # 后端不必知道该问哪条连接
         entry = bot.idmap.lookup_virtual(virtual)
         if entry is None:
             return failed(1404, "user not found")
+        await _refresh_profile(bot, entry, _no_cache(params))
         appid, openid, nickname, kind = entry.bot_appid, entry.openid, entry.nickname, entry.kind
 
     spec = avatars.size_spec(size)

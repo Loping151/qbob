@@ -33,7 +33,7 @@ from ..db import Database
 from ..idmap import IdMap
 from ..qq.api import QQApiClient, QQApiError
 from ..onebot import events as ob_events
-from ..onebot.segments import ATTACHMENT_TAG_RE, inline_markup, split_faces
+from ..onebot.segments import ATTACHMENT_TAG_RE, clean_name, inline_markup, split_faces
 from ..plugin import HookContext, registry as plugins
 from .access import AccessControl
 from .builtin import BuiltinCommands, match_builtin
@@ -75,6 +75,13 @@ HANDLED_MSGS_MAX = 1024
 # (每条群消息都 upsert 会改成员行和 last_seen 索引两个随机页). 记忆表超过上限整表清空重来
 MEMBER_SEEN_INTERVAL = 600
 MEMBER_WRITTEN_MAX = 50000
+# 用户资料(/v2/users/{openid}/info)缓存: 查到的 / 不是私聊联系人的 / 其他失败
+PROFILE_TTL = 600
+PROFILE_MISS_TTL = 3600
+PROFILE_ERR_TTL = 60
+PROFILE_CACHE_MAX = 20000
+# 不是私聊联系人(从没私聊过或没加好友): 查不了资料
+NOT_CONTACT_CODES = frozenset({11292, 40184001})
 # 收到但没下发的消息, 同一会话同一原因多久记一次日志
 DROP_LOG_INTERVAL = 600
 # 开机补查未知状态群: 延后避开开机流量, 单轮上限防千群 bot 打爆接口
@@ -191,7 +198,7 @@ def _find_link(node, depth: int = 0) -> str:
 
 
 def _avatar_link(author: dict) -> str:
-    """author.avatar(2026-11-13 起下发); 只收 http(s), http 升成 https."""
+    """author.avatar; 只收 http(s), http 升成 https."""
     url = str(author.get("avatar") or "").strip()
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
@@ -267,7 +274,7 @@ class BotInstance:
         self.unparsed = unparsed or UnparsedLog(
             unparsed_files(Path(getattr(db, "path", "data/x")).parent)[0]
         )
-        # 新下发字段监视: manager 传全部 bot 共用的那份
+        # 下发字段监视: manager 传全部 bot 共用的那份
         self.fieldwatch = fieldwatch or FieldWatch(db, self.unparsed)
         self.api = QQApiClient(self.appid, self.secret, token_urls, api_bases, http)
         self.api.on_credential_error = self._on_credential_error
@@ -293,6 +300,8 @@ class BotInstance:
         self._handled_set: set[str] = set()
         # (群, 成员) -> 上次写进 group_members 的 (昵称, 名片, last_seen)
         self._member_written: dict[tuple[str, str], tuple[str, str, int]] = {}
+        # 用户 openid -> (资料或 None, 到期 monotonic)
+        self._profiles: dict[str, tuple[dict | None, float]] = {}
         self._drop_logged: dict[tuple[str, str], float] = {}
         self.me_info: dict = {}
         self.started = False
@@ -694,6 +703,48 @@ class BotInstance:
         """发送失败(限频/权限)后的后台复查入口."""
         if chat_type == "group":
             await self.group_state(openid, refresh=True, reason=reason)
+        elif chat_type == "private":
+            await self.user_profile(openid, force=True)
+
+    async def user_profile(self, openid: str, force: bool = False) -> dict | None:
+        """私聊联系人的资料(username/avatar/allow_proactive_msg), 按 openid 缓存.
+
+        查到时顺带更新 id 映射的昵称头像与私聊的主动消息状态; 不是联系人或查询失败回 None.
+        """
+        now = time.monotonic()
+        hit = self._profiles.get(openid)
+        if hit is not None and not force and now < hit[1]:
+            return hit[0]
+        try:
+            data = await self.api.user_info(openid)
+        except QQApiError as exc:
+            miss = exc.code in NOT_CONTACT_CODES
+            if not miss:
+                logger.info("[%s] user_info(%s…) failed: %s", self.appid, openid[:12], exc)
+            self._cache_profile(openid, None, now + (PROFILE_MISS_TTL if miss else PROFILE_ERR_TTL))
+            return None
+        except Exception as exc:  # 网络
+            logger.info("[%s] user_info(%s…) failed: %r", self.appid, openid[:12], exc)
+            self._cache_profile(openid, None, now + PROFILE_ERR_TTL)
+            return None
+        if not isinstance(data, dict):
+            data = {}
+        await self.idmap.to_virtual(
+            self.appid, "user", openid, nickname=str(data.get("username") or ""),
+            union_openid=data.get("union_openid") or None, avatar=_avatar_link(data),
+        )
+        if isinstance(data.get("allow_proactive_msg"), bool):
+            allowed = data["allow_proactive_msg"]
+            state = self._peer_states.get(("private", openid))
+            if state is None or not state.proactive_known or state.allow_proactive != allowed:
+                await self._set_proactive_flag("private", openid, allowed)
+        self._cache_profile(openid, data, now + PROFILE_TTL)
+        return data
+
+    def _cache_profile(self, openid: str, data: dict | None, until: float) -> None:
+        if len(self._profiles) >= PROFILE_CACHE_MAX:
+            self._profiles.clear()
+        self._profiles[openid] = (data, until)
 
     async def _set_proactive_flag(
         self, chat_type: str, openid: str, allowed: bool
@@ -1054,7 +1105,7 @@ class BotInstance:
                 continue
             nodes.append({
                 "sender": {"user_id": 0,
-                           "nickname": sender.group(1).strip() if sender else "未知"},
+                           "nickname": (clean_name(sender.group(1).strip()) if sender else "") or "未知"},
                 "time": 0,
                 "message": segments,
             })
@@ -1075,7 +1126,7 @@ class BotInstance:
             nickname = (element.get("nickname") or element.get("sender_name")
                         or element.get("username") or "未知")
             nodes.append({
-                "sender": {"user_id": 0, "nickname": str(nickname)},
+                "sender": {"user_id": 0, "nickname": clean_name(str(nickname)) or "未知"},
                 "time": int(element.get("timestamp") or 0),
                 "message": segments,
             })
@@ -1400,9 +1451,9 @@ class BotInstance:
         if not at_me:
             # 能收到非 @ 消息本身就证明该群开了"接收全部消息"
             await self._note_recv_all(group_openid)
-        nickname = author.get("username", "") or ""
-        # 2026-11-13 起下发(文档未写): 群名片 / 头像链接
-        card = str(author.get("member_nickname") or "")
+        nickname = clean_name(str(author.get("username") or ""))
+        # 群名片 / 头像链接
+        card = clean_name(str(author.get("member_nickname") or ""))
         avatar = _avatar_link(author)
         payload_role = author.get("member_role", "") or ""
         ts = _parse_ts(data.get("timestamp"))
@@ -1545,6 +1596,7 @@ class BotInstance:
         ts = _parse_ts(data.get("timestamp"))
         user_virtual = await self.idmap.to_virtual(
             self.appid, "user", user_openid,
+            nickname=str(author.get("username") or ""),
             union_openid=author.get("union_openid") or None,
             avatar=_avatar_link(author),
         )

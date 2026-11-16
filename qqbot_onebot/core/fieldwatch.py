@@ -1,6 +1,6 @@
 """平台下发字段监视: 文档与实测之外的字段一出现就落 unparsed.jsonl(kind=new_field).
 
-结构抄自 api-v2 各事件页的字段表(2026-11-15), 加上实测有而文档没写的(注明日期).
+结构 = api-v2 各事件页的字段表 + 实测出现过而字段表没列的.
 逐层比对(含嵌套与数组元素), 路径形如 `author.member_nickname`、`msg_elements[].attachments[].url`;
 每条新路径留 SAMPLES 份样本, 计数存 kv, 重启不重记. 全部 bot 共用一份, 免得同一新字段每个 bot 各记一遍.
 发现新字段后把它补进下面的结构, 就不再记了.
@@ -26,17 +26,18 @@ def _leaf(*names: str) -> dict:
 _USER = _leaf(
     "id", "username", "bot", "union_openid", "union_user_account",
     "user_openid", "member_openid", "member_role",
-    # 2026-11-13 起群消息带, 文档未写: 群名片 / 头像链接
-    "member_nickname", "avatar",
+    "member_nickname", "avatar",   # 群名片 / 头像链接
 )
+# 被 @ 的人另带: 是不是本 bot / @全体 还是单人
+_MENTION = {**_USER, **_leaf("is_you", "scope")}
 _SCENE = _leaf("source", "ext")
 _ATTACHMENT = _leaf("url", "filename", "width", "height", "size", "content_type",
-                    "voice_wav_url", "asr_refer_text")
+                    "voice_wav_url", "asr_refer_text",
+                    "content")   # faceType=6 表情的 gif 附件带, 值为空串
 _ARK_FIELDS = _leaf(
-    # 文档「常见键名」
     "tag", "tags", "title", "desc", "jump_url", "preview", "source", "source_logo",
     "tag_icon", "nickname", "avatar", "address",
-    # 2026-09 实测(音乐/邀请/名片类卡片)
+    # 音乐/邀请/名片类卡片
     "button", "contact", "cover", "inviteType", "songId", "type",
 )
 _ARK = {**_leaf("prompt", "ark_type", "ark_name"), "fields": _ARK_FIELDS}
@@ -46,19 +47,25 @@ _ELEMENT: dict = {
 }
 _ELEMENT["msg_elements"] = _ELEMENT
 _MESSAGE = {
-    **_leaf("id", "content", "timestamp", "message_type", "group_openid", "group_id"),
+    **_leaf("id", "content", "timestamp", "message_type", "group_openid", "group_id",
+            "union_group_openid"),   # 跨应用群 openid, 绑了第三方应用才有值
     "author": _USER, "message_scene": _SCENE, "attachments": _ATTACHMENT,
-    "mentions": _USER, "ark_data": _ARK, "msg_elements": _ELEMENT,
+    "mentions": _MENTION, "ark_data": _ARK, "msg_elements": _ELEMENT,
+    # 引用消息带: msg_nodes 是被引用的那条(保留 @ 的人名)
+    "parallel_message": {"msg_nodes": _ELEMENT},
 }
 _GROUP_OP = _leaf("timestamp", "group_openid", "op_member_openid")
+_ROBOT_OP = {**_GROUP_OP, **_leaf("union_group_openid")}
+_MEMBER_OP = _leaf("timestamp", "group_openid", "member_openid", "union_openid",
+                   "union_group_openid")
 _C2C_OP = _leaf("timestamp", "openid")
 
 SCHEMAS: dict[str, dict] = {
     "GROUP_AT_MESSAGE_CREATE": _MESSAGE,
     "GROUP_MESSAGE_CREATE": _MESSAGE,
     "C2C_MESSAGE_CREATE": _MESSAGE,
-    "GROUP_ADD_ROBOT": _GROUP_OP,
-    "GROUP_DEL_ROBOT": _GROUP_OP,
+    "GROUP_ADD_ROBOT": _ROBOT_OP,
+    "GROUP_DEL_ROBOT": _ROBOT_OP,
     "GROUP_MSG_RECEIVE": _GROUP_OP,
     "GROUP_MSG_REJECT": _GROUP_OP,
     "C2C_MSG_RECEIVE": _C2C_OP,
@@ -66,9 +73,8 @@ SCHEMAS: dict[str, dict] = {
     "FRIEND_ADD": {**_leaf("timestamp", "openid", "scene", "scene_param", "short_code"),
                    "author": _leaf("union_openid")},
     "FRIEND_DEL": {**_leaf("timestamp", "openid"), "author": _leaf("union_openid")},
-    "GROUP_MEMBER_ADD": _leaf("timestamp", "group_openid", "member_openid"),
-    "GROUP_MEMBER_REMOVE": _leaf("timestamp", "group_openid", "member_openid",
-                                 "user_openid"),
+    "GROUP_MEMBER_ADD": _MEMBER_OP,
+    "GROUP_MEMBER_REMOVE": {**_MEMBER_OP, **_leaf("user_openid")},
     "GROUP_JOIN_REQUEST": {
         **_leaf("group_openid", "join_request_id", "risk_tips", "union_openid",
                 "member_openid", "username", "apply_at", "apply_source",

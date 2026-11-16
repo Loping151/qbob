@@ -12,6 +12,7 @@ import aiohttp
 from ..config import ServerConfig
 from ..db import Database, insert_bot, row_to_bot
 from ..idmap import IdMap
+from ..onebot.segments import clean_name
 from ..plugin import registry as plugins
 from . import cdnkeys, groups
 from .access import AccessControl
@@ -71,6 +72,7 @@ class BotManager:
         await self.store.load()
         self.http = aiohttp.ClientSession()
         await self._cleanup_bogus_idmap()
+        await self._clean_stored_names()
         await self._seed_bots()
         await groups.adopt_existing(self.db, self.config)
         await self.mark_setup_done()
@@ -106,6 +108,31 @@ class BotManager:
             self.idmap._by_key.clear()
             self.idmap._by_virtual.clear()
             await self.idmap.load()
+
+    async def _clean_stored_names(self) -> None:
+        """库里的群名/昵称/群名片带小表情标记的, 换成 clean_name 的写法(写入时已经换)."""
+        fixed = 0
+        rows = await self.db.fetchall(
+            "SELECT virtual_id, nickname FROM id_map WHERE nickname LIKE '%<$%'")
+        for row in rows:
+            name = clean_name(row["nickname"])
+            if name != row["nickname"]:
+                await self.db.execute("UPDATE id_map SET nickname=? WHERE virtual_id=?",
+                                      (name, row["virtual_id"]))
+                entry = self.idmap.lookup_virtual(row["virtual_id"])
+                if entry is not None:
+                    entry.nickname = name
+                fixed += 1
+        rows = await self.db.fetchall(
+            "SELECT rowid, nickname, card FROM group_members"
+            " WHERE nickname LIKE '%<$%' OR card LIKE '%<$%'")
+        for row in rows:
+            await self.db.execute(
+                "UPDATE group_members SET nickname=?, card=? WHERE rowid=?",
+                (clean_name(row["nickname"]), clean_name(row["card"]), row["rowid"]))
+            fixed += 1
+        if fixed:
+            logger.info("库里 %d 个名字的小表情标记已换成 emoji/[名字]", fixed)
 
     async def _seed_bots(self) -> None:
         row = await self.db.fetchone("SELECT COUNT(*) AS n FROM bots")

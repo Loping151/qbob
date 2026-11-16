@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 
 from .db import Database
+from .onebot.segments import clean_name
 
 VIRTUAL_BASE = 10**14
 VIRTUAL_SPAN = 9 * 10**14  # [1e14, 1e15)
@@ -78,6 +79,7 @@ class IdMap:
         avatar: str = "",
     ) -> int:
         """取(或建)openid 的虚拟号, 顺带更新昵称与头像链接."""
+        nickname = clean_name(nickname)
         key = (bot_appid, kind, openid)
         cached = self._by_key.get(key)
         now = int(time.time())
