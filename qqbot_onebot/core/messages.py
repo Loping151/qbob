@@ -23,6 +23,9 @@ C2C_PASSIVE_WINDOW = 3600        # 60 min
 C2C_PASSIVE_BUDGET = 4
 MID_MIN, MID_MAX = 10**8, 2**31 - 10**6  # int32 内, 起始随机
 MID_BLOCK = 200   # 每次预留多少个 id(减少写库次数)
+# 按 qq_msg_id 找入站消息时的时间窗(走 idx_msg_ts): 重推 / @ 副本带的是同一个平台时间戳,
+# 只在事件缺 timestamp、ts 取了本地时钟时才会有偏差
+SEEN_TS_SLACK = 120
 
 
 MAX_FIELD_CHARS = 512   # 单字段截断长度(base64 图片可达几 MB)
@@ -183,10 +186,13 @@ class MessageStore:
             "UPDATE messages SET content=? WHERE mid=?",
             (json.dumps(sanitize_segments(segments), ensure_ascii=False), mid))
 
-    async def seen(self, bot_appid: str, qq_msg_id: str) -> bool:
+    async def seen(self, bot_appid: str, qq_msg_id: str, ts: int) -> bool:
+        """这条入站消息是否已落库. ts 为事件时间戳(与入库时同一口径)."""
         row = await self.db.fetchone(
-            "SELECT mid FROM messages WHERE bot_appid=? AND qq_msg_id=? AND direction='in'",
-            (bot_appid, qq_msg_id),
+            "SELECT mid FROM messages INDEXED BY idx_msg_ts"
+            " WHERE ts BETWEEN ? AND ? AND bot_appid=? AND qq_msg_id=? AND direction='in'"
+            " LIMIT 1",
+            (ts - SEEN_TS_SLACK, ts + SEEN_TS_SLACK, bot_appid, qq_msg_id),
         )
         return row is not None
 
@@ -244,11 +250,17 @@ class MessageStore:
     async def revoke_reply_slot(self, bot_appid: str, slot: tuple) -> None:
         """平台拒了这个被动凭据(过期/无效/该事件不能回复): 作废, 之后不再选它."""
         credential, _, kind = slot
-        sql = ("UPDATE passive_events SET expire=0 WHERE bot_appid=? AND event_id=?"
-               if kind == "event" else
-               "UPDATE messages SET passive_expire=0 WHERE bot_appid=? AND qq_msg_id=?")
+        if kind == "event":
+            sql = "UPDATE passive_events SET expire=0 WHERE bot_appid=? AND event_id=?"
+            args: tuple = (bot_appid, credential)
+        else:
+            # 凭据只会取自窗口内的入站消息(passive_expire = ts + 窗口), 按时间窗定位
+            sql = ("UPDATE messages INDEXED BY idx_msg_ts SET passive_expire=0"
+                   " WHERE ts >= ? AND bot_appid=? AND qq_msg_id=? AND direction='in'")
+            since = int(time.time()) - max(GROUP_PASSIVE_WINDOW, C2C_PASSIVE_WINDOW) - SEEN_TS_SLACK
+            args = (since, bot_appid, credential)
         async with self._lock:
-            await self.db.execute(sql, (bot_appid, credential))
+            await self.db.execute(sql, args)
 
     async def acquire_reply_slot(
         self,

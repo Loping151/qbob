@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS messages (
     recalled_at    INTEGER NOT NULL DEFAULT 0,  -- 撤回时间(0=未撤回)
     sent_text      TEXT NOT NULL DEFAULT ''     -- 外发实际发出的文字(插件改写后与 content 不同)
 );
-CREATE INDEX IF NOT EXISTS idx_msg_qqid ON messages (bot_appid, qq_msg_id);
+-- 按 qq_msg_id 的查找(去重 / 作废被动凭据)都只找近期入站消息, 走 idx_msg_ts 限定时间窗;
+-- 原来的 (bot_appid, qq_msg_id) 索引键是随机串, 每条消息都改一个随机页, 已删(见 DROPPED_INDEXES)
 CREATE INDEX IF NOT EXISTS idx_msg_peer ON messages (bot_appid, chat_type, peer_openid, ts);
 CREATE INDEX IF NOT EXISTS idx_msg_ts ON messages (ts);
 -- 引用回复入站要按 msg_idx 反查(每条带引用的消息一次), 没索引就是全扫该 bot
@@ -246,12 +247,16 @@ MIGRATIONS = [
     ("id_map", "avatar", "avatar TEXT NOT NULL DEFAULT ''"),
 ]
 
+# 老库里已不再需要的索引, 启动时删掉
+DROPPED_INDEXES = ("idx_msg_qqid",)
+
 
 class Database:
     # 写入攒批: execute/executemany 不再每条语句单独提交, 最多等 COMMIT_DELAY 秒或攒满
     # COMMIT_MAX 条再一起提交, 消息表和它的几个索引的尾页一次写完. 同一连接上的读看得到
-    # 未提交的写; 正常关闭会先提交, 进程被强杀最多丢这段时间的写入. COMMIT_DELAY<=0 即逐条提交
-    COMMIT_DELAY = 1.0
+    # 未提交的写; 正常关闭会先提交, 进程被强杀最多丢这段时间的写入. COMMIT_DELAY<=0 即逐条提交.
+    # 消息约 1 条/秒时 1 秒窗口一批只有 2 条左右, 3 秒能让热页(消息表尾页/时间索引/活跃会话)多合并几次
+    COMMIT_DELAY = 3.0
     COMMIT_MAX = 500
 
     def __init__(self, path: str):
@@ -278,6 +283,8 @@ class Database:
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(SCHEMA)
         await self._migrate()
+        for name in DROPPED_INDEXES:
+            await self._conn.execute(f"DROP INDEX IF EXISTS {name}")
         await self._conn.commit()
 
     async def _migrate(self) -> None:

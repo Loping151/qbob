@@ -71,6 +71,10 @@ CREDENTIAL_DISABLE_AFTER = 3
 IDENTITY_REFRESH_INTERVAL = 3600
 # 未落库消息 id 的去重记忆(有界). 平台重推只在投递后几秒内; 落库的由 store.seen 兜.
 HANDLED_MSGS_MAX = 1024
+# group_members 只在昵称/名片/角色变化时立即写; 仅刷新 last_seen 的话同一成员最多这么久写一次
+# (每条群消息都 upsert 会改成员行和 last_seen 索引两个随机页). 记忆表超过上限整表清空重来
+MEMBER_SEEN_INTERVAL = 600
+MEMBER_WRITTEN_MAX = 50000
 # 收到但没下发的消息, 同一会话同一原因多久记一次日志
 DROP_LOG_INTERVAL = 600
 # 开机补查未知状态群: 延后避开开机流量, 单轮上限防千群 bot 打爆接口
@@ -287,6 +291,8 @@ class BotInstance:
         # 而 @ 消息的 GROUP_MESSAGE_CREATE 副本会被误判成"收到非 @ 消息".
         self._handled_msgs: deque[str] = deque(maxlen=HANDLED_MSGS_MAX)
         self._handled_set: set[str] = set()
+        # (群, 成员) -> 上次写进 group_members 的 (昵称, 名片, last_seen)
+        self._member_written: dict[tuple[str, str], tuple[str, str, int]] = {}
         self._drop_logged: dict[tuple[str, str], float] = {}
         self.me_info: dict = {}
         self.started = False
@@ -1367,7 +1373,8 @@ class BotInstance:
             self._inflight_msgs.add(qq_msg_id)
         try:
             if qq_msg_id and (qq_msg_id in self._handled_set
-                              or await self.store.seen(self.appid, qq_msg_id)):
+                              or await self.store.seen(
+                                  self.appid, qq_msg_id, _parse_ts(data.get("timestamp")))):
                 return                  # 处理过的重推(未启用的群不落库, 只在内存里)
             recorded = await self._on_group_message_inner(data, at_me, qq_msg_id)
             # 落了库的由 store.seen 兜住, 内存只记没落库的
@@ -1428,20 +1435,29 @@ class BotInstance:
             self.appid, "user", user_openid, nickname=nickname,
             union_openid=author.get("union_openid") or None, avatar=avatar,
         )
-        # role 仅在 payload 显式给出时覆盖缓存(GROUP_ADD_ROBOT 写入的 admin 不被冲掉)
-        await self.db.execute(
-            "INSERT INTO group_members (bot_appid, group_openid, user_openid,"
-            " nickname, role, last_seen, card) VALUES (?,?,?,?,?,?,?)"
-            " ON CONFLICT(bot_appid, group_openid, user_openid) DO UPDATE SET"
-            " nickname=CASE WHEN excluded.nickname!='' THEN excluded.nickname ELSE nickname END,"
-            " role=CASE WHEN ?!='' THEN ? ELSE role END,"
-            " card=CASE WHEN excluded.card!='' THEN excluded.card ELSE card END,"
-            " last_seen=excluded.last_seen",
-            # 原始 payload_role 只用来判给没给, 写入的值统一归一化
-            (self.appid, group_openid, user_openid, nickname,
-             self._norm_role(payload_role), ts, card,
-             payload_role, self._norm_role(payload_role)),
-        )
+        member_key = (group_openid, user_openid)
+        prev = self._member_written.get(member_key)
+        if (prev is None or payload_role
+                or (nickname and nickname != prev[0]) or (card and card != prev[1])
+                or not 0 <= ts - prev[2] < MEMBER_SEEN_INTERVAL):
+            # role 仅在 payload 显式给出时覆盖缓存(GROUP_ADD_ROBOT 写入的 admin 不被冲掉)
+            await self.db.execute(
+                "INSERT INTO group_members (bot_appid, group_openid, user_openid,"
+                " nickname, role, last_seen, card) VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(bot_appid, group_openid, user_openid) DO UPDATE SET"
+                " nickname=CASE WHEN excluded.nickname!='' THEN excluded.nickname ELSE nickname END,"
+                " role=CASE WHEN ?!='' THEN ? ELSE role END,"
+                " card=CASE WHEN excluded.card!='' THEN excluded.card ELSE card END,"
+                " last_seen=excluded.last_seen",
+                # 原始 payload_role 只用来判给没给, 写入的值统一归一化
+                (self.appid, group_openid, user_openid, nickname,
+                 self._norm_role(payload_role), ts, card,
+                 payload_role, self._norm_role(payload_role)),
+            )
+            if len(self._member_written) >= MEMBER_WRITTEN_MAX:
+                self._member_written.clear()
+            self._member_written[member_key] = (
+                nickname or (prev[0] if prev else ""), card or (prev[1] if prev else ""), ts)
         role = await self._member_role(group_openid, user_openid, payload_role)
 
         segments: list[dict] = []
@@ -1516,7 +1532,8 @@ class BotInstance:
                 return
             self._inflight_msgs.add(qq_msg_id)
         try:
-            if qq_msg_id and await self.store.seen(self.appid, qq_msg_id):
+            if qq_msg_id and await self.store.seen(
+                    self.appid, qq_msg_id, _parse_ts(data.get("timestamp"))):
                 return
             await self._on_c2c_message_inner(data, qq_msg_id)
         finally:
@@ -1711,6 +1728,7 @@ class BotInstance:
             " AND user_openid=?",
             (self.appid, group_openid, member_openid),
         )
+        self._member_written.pop((group_openid, member_openid), None)
         state = self._peer_states.get(("group", group_openid))
         if not (state and state.compliant):
             return
