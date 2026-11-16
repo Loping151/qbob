@@ -132,6 +132,22 @@ _QUOTE_BLOB_RE = re.compile(
 # 一次性 idx 不能当别名回写, 否则冲掉那条消息真正的 REFIDX_
 _STABLE_IDX_PREFIX = "REFIDX_"
 
+# 平台媒体文件名是内容哈希, 同一张图有 {8-4-4-4-12}.gif 与 32 位连写两种写法
+_MEDIA_HASH_RE = re.compile(
+    r"^\{?([0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12})\}?(?:\.\w+)?$")
+_MEDIA_TYPES = ("image", "video", "record", "file")
+# 引用近段没对上时往前找多久(只认唯一候选)
+REPLY_MATCH_FAR = 86400
+
+
+def _media_key(name) -> str | None:
+    m = _MEDIA_HASH_RE.match(str(name or "").rsplit("/", 1)[-1])
+    return m.group(1).replace("-", "").upper() if m else None
+
+
+def _like_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 
 def unwrap_quote_blob(text: str) -> str:
     """平台渲染的"引用的引用" -> 被引用那条自己的内容; 认不出就原样返回.
@@ -153,6 +169,8 @@ _FWD_BODY_RE = re.compile(r"\[消息内容\]\s*(.*?)(?=\n\s*\[|\Z)", re.S)
 _FWD_ATTACH_RE = re.compile(
     r"\[附件\d+\][ \t]*类型:(\S+)[ \t]+文件名:(.+?)(?:[ \t]+尺寸:(\S+))?"
     r"(?:[ \t]+大小:(\S+))?(?:[ \t]+URL:(\S+))?[ \t]*$", re.M)
+
+_ATTACH_KINDS = {"图片": "image/", "视频": "video/", "语音": "voice/"}
 
 _LINK_KEYS = ("jumpurl", "jump_url", "qqdocurl", "url", "link", "share_url",
               "detail_url", "web_url", "weburl")
@@ -1162,6 +1180,8 @@ class BotInstance:
         """
         ref_idx = self._ext_value(data, "ref_msg_idx")
         if not ref_idx:
+            if data.get("message_type") == 103:
+                self.unparsed.record("quote_lost", "引用消息没带 ref_msg_idx", data, self.appid)
             return None
         elements = data.get("msg_elements")
         element = elements[0] if isinstance(elements, list) and elements else None
@@ -1172,13 +1192,21 @@ class BotInstance:
             return {"type": "reply", "data": {"id": str(found)}}
 
         if not isinstance(element, dict):
+            self.unparsed.record("quote_lost", "ref_msg_idx 查不到且没给 msg_elements", data, self.appid)
             return None
 
-        # 被引用的本身也是引用时是渲染文本, 先还原(见 unwrap_quote_blob)
+        # 被引用的本身也是引用时是渲染文本, 先还原(见 unwrap_quote_blob); 媒体只在
+        # 「[附件N] 类型:图片 文件名:…」行里, 取被引用那条自己的(关联消息之前)
         blob = str(element.get("content") or "")
         plain = unwrap_quote_blob(blob)
         if plain != blob:
             element = {**element, "content": plain}
+            if not element.get("attachments"):
+                element["attachments"] = [
+                    {"content_type": _ATTACH_KINDS.get(kind, "file"), "filename": name.strip(),
+                     "url": url or ""}
+                    for kind, name, _dim, _size, url in
+                    _FWD_ATTACH_RE.findall(blob.split("[关联消息]", 1)[0])]
 
         # 平台投递时可能换 idx(引用的引用是一次性 TMP_), 按内容特征在近期消息里找;
         # 否则落成 user_id=0 的影子记录, to_me/撤回都失效.
@@ -1196,6 +1224,7 @@ class BotInstance:
 
         segments = await self._element_segments(element)
         if not segments:
+            self.unparsed.record("quote_lost", "msg_elements 解析不出内容", data, self.appid)
             return None
         # 补登记: qq_msg_id 留空(不可撤回), 发送者未知 -> user_id 0
         mid = await self.store.record_incoming(
@@ -1205,6 +1234,28 @@ class BotInstance:
             msg_idx=ref_idx,
         )
         return {"type": "reply", "data": {"id": str(mid)}}
+
+    def _mark_lost_quote(self, data: dict, content_segs: list[dict]) -> list[dict]:
+        """引用对不上任何消息时标一句「[引用了X的一条消息]」.
+
+        平台会在正文开头补 <@原作者>(客户端不显示), 引用丢了就像是自己打的 @;
+        作者不是 bot 时拿它换成提示, 是 bot 时留着 @(nonebot 据此置 to_me), 提示跟在后面.
+        """
+        match = _AT_TAG_RE.match((data.get("content") or "").strip())
+        openid = match and (match.group(1) or match.group(2))
+        author = next((m for m in data.get("mentions") or []
+                       if openid and openid in (m.get("id"), m.get("member_openid"))), None)
+        name = clean_name(str((author or {}).get("member_nickname")
+                              or (author or {}).get("username") or ""))
+        note = {"type": "text", "data": {"text": f"[引用了{name}的一条消息]" if name else "[引用了一条消息]"}}
+        segs = list(content_segs)
+        lead_at = bool(segs) and segs[0]["type"] == "at" and author is not None
+        if lead_at and segs[0]["data"].get("qq") != str(self.self_id):
+            return [note, *segs[1:]]
+        if lead_at or (segs and segs[0]["type"] == "at" and segs[0]["data"].get("qq") == str(self.self_id)):
+            note["data"]["text"] = " " + note["data"]["text"]
+            return [segs[0], note, *segs[1:]]
+        return [note, *segs]
 
     async def _quotes_own_message(self, data: dict) -> bool:
         """这条是不是在引用 bot 自己发过的消息(只在未启用的群里问).
@@ -1295,33 +1346,73 @@ class BotInstance:
         self, chat_type: str, peer_openid: str, element: dict,
         out_only: bool = False,
     ) -> tuple[int | None, bool]:
-        """引用 idx 对不上时, 按内容特征在近 30 分钟的同会话消息里归属.
+        """引用 idx 对不上时, 按内容特征在同会话消息里归属.
 
-        媒体按字节大小与外发的 media_sizes 求交, 文本要精确相等(也比插件改写后
-        实际发出的文字). 外发优先, 再退到入站; 取最近一条.
+        媒体按字节大小与外发的 media_sizes 求交、按平台文件名(内容哈希)与入站的
+        图片比; 文本要精确相等(也比插件改写后实际发出的文字). 先看近 30 分钟、
+        外发优先、取最近一条; 不中再往前找一天, 只认唯一一条.
         返回 (mid, 是否唯一候选), 都不中为 (None, False).
         """
         text = str(element.get("content") or "").strip()
-        sizes = set()
+        sizes: set[int] = set()
+        files: set[str] = set()
         for att in element.get("attachments") or []:
-            if isinstance(att, dict) and att.get("size"):
+            if not isinstance(att, dict):
+                continue
+            if att.get("size"):
                 try:
                     sizes.add(int(att["size"]))
                 except (TypeError, ValueError):
                     pass
-        if not text and not sizes:
+            if key := _media_key(att.get("filename")):
+                files.add(key)
+        if not text and not sizes and not files:
             return None, False
+        # 引用 markdown 消息时平台可能给原文: 链接写回纯文本发送时的「文字 网址」;
+        # 引用图文卡片给的是渲染文本, 还原成发送时记的 标题+简介
+        texts = {text, _MD_LINK_RE.sub(r"\1 \2", text), cards.key_from_quote(text)} - {""}
+        now = int(time.time())
         rows = await self.db.fetchall(
             "SELECT mid, direction, content, media_sizes, sent_text FROM messages"
             " WHERE bot_appid=? AND chat_type=? AND peer_openid=? AND ts>=?"
             # 影子记录不能当匹配目标
             " AND (direction='out' OR user_virtual!=0)"
             " ORDER BY mid DESC LIMIT 60",
-            (self.appid, chat_type, peer_openid, int(time.time()) - 1800),
+            (self.appid, chat_type, peer_openid, now - 1800),
         )
-        # 引用 markdown 消息时平台可能给原文: 链接写回纯文本发送时的「文字 网址」;
-        # 引用图文卡片给的是渲染文本, 还原成发送时记的 标题+简介
-        texts = {text, _MD_LINK_RE.sub(r"\1 \2", text), cards.key_from_quote(text)} - {""}
+        hits = self._quote_hits(rows, texts, sizes, files, out_only)
+        picked = hits["out"] or hits["in"]
+        if picked:
+            return picked[0], len(picked) == 1
+
+        # 平台常给同一条消息换 idx, 引用一小时前的消息也常见; 常见文字/表情图会有多条, 不唯一就不认
+        likes, params = [], []
+        for t in texts:
+            pat = _like_escape(json.dumps(t[:12], ensure_ascii=False)[1:-1])
+            likes.append("content LIKE ? ESCAPE '\\' OR sent_text LIKE ? ESCAPE '\\'")
+            params += [f"%{pat}%", f"%{_like_escape(t[:12])}%"]
+        for key in files:
+            likes.append("content LIKE ?")      # 两种写法开头都是这 8 位
+            params.append(f"%{key[:8]}%")
+        for size in sizes:
+            likes.append("media_sizes LIKE ?")
+            params.append(f"%{size}%")
+        seen = [row["mid"] for row in rows]
+        skip = f" AND mid NOT IN ({','.join('?' * len(seen))})" if seen else ""
+        rows = await self.db.fetchall(
+            "SELECT mid, direction, content, media_sizes, sent_text FROM messages"
+            " WHERE bot_appid=? AND chat_type=? AND peer_openid=? AND ts>=?"
+            " AND (direction='out' OR user_virtual!=0)"
+            f"{skip} AND ({' OR '.join(likes)}) ORDER BY mid DESC LIMIT 50",
+            (self.appid, chat_type, peer_openid, now - REPLY_MATCH_FAR, *seen, *params),
+        )
+        hits = self._quote_hits(rows, texts, sizes, files, out_only)
+        picked = hits["out"] + hits["in"]
+        return (picked[0], True) if len(picked) == 1 else (None, False)
+
+    @staticmethod
+    def _quote_hits(rows, texts: set[str], sizes: set[int], files: set[str],
+                    out_only: bool) -> dict[str, list[int]]:
         hits: dict[str, list[int]] = {"out": [], "in": []}
         for row in rows:
             if out_only and row["direction"] != "out":
@@ -1334,21 +1425,25 @@ class BotInstance:
                 except ValueError:
                     row_sizes = set()
                 hit = bool(sizes & row_sizes)
-            if not hit and texts:
+            if not hit and (texts or files):
                 try:
                     segs = json.loads(row["content"])
                 except ValueError:
                     segs = []
-                row_text = "".join(
-                    s.get("data", {}).get("text", "")
-                    for s in segs if isinstance(s, dict) and s.get("type") == "text"
-                ).strip()
-                # 插件改写过的(转发转网页等), 记录的是原消息, 要比实际发出的文字
-                hit = bool(texts & ({row_text, str(row["sent_text"] or "").strip()} - {""}))
+                segs = [s for s in segs if isinstance(s, dict)]
+                if files:
+                    hit = bool(files & {_media_key((s.get("data") or {}).get("file"))
+                                        for s in segs if s.get("type") in _MEDIA_TYPES})
+                if not hit and texts:
+                    row_text = "".join(
+                        s.get("data", {}).get("text", "")
+                        for s in segs if s.get("type") == "text"
+                    ).strip()
+                    # 插件改写过的(转发转网页等), 记录的是原消息, 要比实际发出的文字
+                    hit = bool(texts & ({row_text, str(row["sent_text"] or "").strip()} - {""}))
             if hit:
                 hits["out" if row["direction"] == "out" else "in"].append(row["mid"])
-        picked = hits["out"] or hits["in"]
-        return (picked[0], len(picked) == 1) if picked else (None, False)
+        return hits
 
     async def _extra_segments(self, data: dict, qq_msg_id: str) -> list[dict]:
         """处理 content/attachments 之外的形态: 合并转发/引用/ARK 等; 落盘供补解析."""
@@ -1537,6 +1632,12 @@ class BotInstance:
         reply = await self._reply_segment(data, "group", group_openid, group_virtual)
         if reply is not None:
             segments.append(reply)   # 必须最前: nonebot 只看 message[0] 认引用
+        elif self._ext_value(data, "ref_msg_idx") or data.get("message_type") == 103:
+            content_segs = self._mark_lost_quote(data, content_segs)
+        elif any(seg["type"] == "at" and seg["data"].get("qq") == str(user_virtual)
+                 for seg in content_segs):
+            # 引用时平台会补 <@原作者>; 没认出引用却 @ 了自己, 多半是引用没下发
+            self.unparsed.record("self_at", "没有引用却 @ 了发送者自己", data, self.appid)
         if at_me and not at_in_text:
             # @ 事件的 content 已被平台剥掉 @bot, 这里补回来(nonebot 据此置 to_me)
             segments.append({"type": "at", "data": {"qq": str(self.self_id)}})
