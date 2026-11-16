@@ -43,6 +43,13 @@ class RateLimiter:
                 logger.debug("rate limit %s: 排队 %.3fs", self.name, wait)
                 await asyncio.sleep(wait)
 
+BATCH_REMOVE_MAX = 20
+# 移出群成员的权限开关没开: 机器人管理端 / 群主
+REMOVE_DENIED_CODES = {
+    40103011: "机器人管理端没开「移除群成员」",
+    40103012: "群主没给机器人开「移除群成员」权限",
+}
+
 # 凭据的确定性判决, 不会自愈
 # 100016 invalid appid or secret(注销的 bot 也报); 100007 appid invalid(bot 过期/被删, 2026-10 实测)
 INVALID_CREDENTIAL_CODES = {100016, 100007}
@@ -370,6 +377,17 @@ class QQApiClient:
         return await self.request(
             "POST", f"/v2/groups/{group_openid}/restrict_chat_setting",
             {"members": [member]},
+        )
+
+    async def batch_remove_members(self, group_openid: str,
+                                   member_openids: list[str]) -> dict:
+        """移出群成员, 单次最多 BATCH_REMOVE_MAX 个; 成功回 remove_members_result=success.
+
+        40103011 = 机器人管理端没开「移除群成员」, 40103012 = 群主没给机器人开这个权限.
+        """
+        return await self.request(
+            "POST", f"/v2/groups/{group_openid}/batch_remove_members",
+            {"member_openids": member_openids},
         )
 
     # 注: 群聊 api-v2 没有全员禁言. POST 只认 members[], global_rule 只读(塞了被静默忽略).

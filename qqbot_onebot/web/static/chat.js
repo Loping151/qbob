@@ -424,7 +424,7 @@ function onChatContextMenu(e) {
     const src = zoomable.dataset.zoom || zoomable.src;
     items.push({ label: "查看大图", run: () => openLightbox(src, zoomable.alt || "") });
   }
-  // 现成的操作按钮(引用/撤回/禁言)原样搬进菜单: 显隐/权限逻辑零重复
+  // 现成的操作按钮(引用/撤回/禁言/移出)原样搬进菜单: 显隐/权限逻辑零重复
   for (const btn of row.querySelectorAll(".bub-act:not(:disabled)")) {
     items.push({ label: btn.textContent, run: () => btn.click() });
   }
@@ -485,7 +485,7 @@ function renderReplyTo() {
   });
 }
 
-/** 引用 / 撤回 / 禁言 */
+/** 引用 / 撤回 / 禁言 / 移出 */
 async function onBubbleAction(e) {
   const fwd = e.target.closest("[data-fwd]");
   if (fwd) { openForward(fwd.dataset.fwd); return; }
@@ -493,6 +493,25 @@ async function onBubbleAction(e) {
   if (quote) { pickReply(quote); return; }
   const recall = e.target.closest("[data-recall]");
   const mute = e.target.closest("[data-mute]");
+  const kick = e.target.closest("[data-kick]");
+  if (kick) {
+    const name = kick.dataset.name || kick.dataset.kick;
+    if (!confirm(`把 ${name} 移出本群？`)) return;
+    kick.disabled = true;
+    try {
+      await api(`${BASE}/api/chat/kick`, { method: "POST", body: {
+        appid: chatState.appid, peer_id: chatState.peerId,
+        user_id: Number(kick.dataset.kick) } });
+      toast(`已移出 ${name}`);
+      // 这人其它气泡上的禁言/移出也没用了
+      for (const btn of document.querySelectorAll(
+        `[data-kick="${kick.dataset.kick}"], [data-mute="${kick.dataset.kick}"]`)) btn.remove();
+    } catch (err) {
+      kick.disabled = false;
+      if (err.status !== 401) toast(err.message, "err", 6000);
+    }
+    return;
+  }
   if (recall) {
     if (!confirm("撤回这条消息？")) return;
     recall.disabled = true;
@@ -625,7 +644,7 @@ function bubbleHTML(m) {
 
 /** 气泡下的操作, 只显示做得到的. 撤回(实测, 与文档不符): bot 是群管则自己的不限时,
  *  别人的也能撤但群主/管理员的报 40062003; 普通成员只能撤自己 2 分钟内的.
- *  禁言要 bot 是群管且对方不是管理层. */
+ *  禁言、移出要 bot 是群管且对方不是管理层. */
 function bubbleActionsHTML(m, mine) {
   if (m.recalled) return "";
   const admin = chatState.botRole === "admin" || chatState.botRole === "owner";
@@ -641,6 +660,8 @@ function bubbleActionsHTML(m, mine) {
   if (!mine && admin && !targetIsStaff && chatState.chatType === "group" && m.user_id) {
     acts.push(`<button type="button" class="bub-act" data-mute="${m.user_id}"
                  data-name="${esc(m.nickname || "")}">禁言</button>`);
+    acts.push(`<button type="button" class="bub-act" data-kick="${m.user_id}"
+                 data-name="${esc(m.nickname || "")}">移出</button>`);
   }
   return acts.length ? `<div class="bub-acts">${acts.join("")}</div>` : "";
 }

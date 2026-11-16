@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from .. import __version__
 from ..core import avatars
 from ..core.sender import POKE_TEXT, SendError
-from ..qq.api import QQApiError
+from ..qq.api import REMOVE_DENIED_CODES, QQApiError
 from .segments import emoji_of, segments_to_cq
 
 if TYPE_CHECKING:
@@ -633,7 +633,38 @@ async def set_friend_add_request(bot: "BotInstance", params: dict) -> dict:
 
 @action("set_group_kick", "set_group_kick_members")
 async def set_group_kick(bot: "BotInstance", params: dict) -> dict:
-    return todo("set_group_kick: 官方接口不支持移除群成员")
+    """移出群成员; user_id 可以是数组(set_group_kick_members), 按平台上限分批.
+
+    reject_add_request(拉黑)要群黑名单接口, 该接口只对白名单 bot 开放, 不生效.
+    """
+    group_openid = _resolve_group(bot, params)
+    if group_openid is None:
+        return failed(1404, f"unknown group_id {params.get('group_id')}")
+    raw = params.get("user_id")
+    if raw is None:
+        raw = params.get("user_ids")
+    raw_ids = raw if isinstance(raw, list) else [raw]
+    openids: list[str] = []
+    for raw_id in raw_ids:
+        if _int_of(raw_id) == bot.self_id:
+            return failed(1400, "不能移出 bot 自己")
+        openid = _resolve_user(bot, {"user_id": raw_id})
+        if openid is None:
+            return failed(1404, f"unknown user_id {raw_id}")
+        if openid not in openids:
+            openids.append(openid)
+    if not openids:
+        return failed(1400, "missing user_id")
+    try:
+        await bot.remove_members(group_openid, openids)
+    except QQApiError as exc:
+        reason = REMOVE_DENIED_CODES.get(exc.code)
+        if reason is None:
+            raise
+        done = getattr(exc, "removed", 0)
+        suffix = f"(已移出 {done} 人)" if done else ""
+        return failed(1403, f"qq api {exc.code}: {reason}{suffix}")
+    return ok()
 
 
 @action("set_group_admin")
@@ -943,6 +974,11 @@ async def handle_quick_operation(bot: "BotInstance", params: dict) -> dict:
         return await send_msg(bot, send_params)
     if operation.get("delete"):
         return await delete_msg(bot, {"message_id": context.get("message_id")})
+    if operation.get("kick"):
+        return await set_group_kick(bot, {
+            "group_id": context.get("group_id"),
+            "user_id": context.get("user_id"),
+        })
     if operation.get("ban"):
         return await set_group_ban(bot, {
             "group_id": context.get("group_id"),

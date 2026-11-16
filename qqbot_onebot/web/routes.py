@@ -1593,6 +1593,34 @@ def build_router() -> APIRouter:
                     duration, session["username"])
         return {"ok": True}
 
+    @router.post("/chat/kick")
+    async def chat_kick(request: Request,
+                        session: dict = require_role("advanced")):
+        """移出群成员: 机器人管理端与群主都要给机器人开「移除群成员」."""
+        manager = request.app.state.manager
+        body = await request.json()
+        appid = str(body.get("appid", ""))
+        bot = manager.get_bot(appid)
+        if bot is None:
+            raise HTTPException(status_code=404, detail="bot 未运行")
+        group_openid = _peer_openid(manager, appid, "group",
+                                    int(body.get("peer_id") or 0))
+        entry = manager.idmap.lookup_virtual(int(body.get("user_id") or 0))
+        if entry is None or entry.kind != "user" or entry.bot_appid != appid:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        from ..qq.api import REMOVE_DENIED_CODES, QQApiError  # noqa: PLC0415
+
+        try:
+            await bot.remove_members(group_openid, [entry.openid])
+        except QQApiError as exc:
+            reason = REMOVE_DENIED_CODES.get(exc.code)
+            if reason:
+                raise HTTPException(status_code=403, detail=reason)
+            raise HTTPException(status_code=400, detail=f"操作失败: {exc.message}")
+        logger.info("chat kick %s %s by %s", appid, body.get("user_id"),
+                    session["username"])
+        return {"ok": True}
+
     @router.get("/media/{token}")
     async def local_media(token: str, request: Request,
                           session: dict = require_role("advanced")):

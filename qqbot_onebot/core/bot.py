@@ -31,7 +31,7 @@ import aiohttp
 
 from ..db import Database
 from ..idmap import IdMap
-from ..qq.api import QQApiClient, QQApiError
+from ..qq.api import BATCH_REMOVE_MAX, QQApiClient, QQApiError
 from ..onebot import events as ob_events
 from ..onebot.segments import ATTACHMENT_TAG_RE, clean_name, inline_markup, split_faces
 from ..plugin import HookContext, registry as plugins
@@ -740,6 +740,28 @@ class BotInstance:
                 await self._set_proactive_flag("private", openid, allowed)
         self._cache_profile(openid, data, now + PROFILE_TTL)
         return data
+
+    async def remove_members(self, group_openid: str, openids: list[str]) -> None:
+        """移出群成员, 按平台上限分批; 移出的先从成员缓存删掉(退群事件到了也会删).
+
+        某批被拒时抛 QQApiError, 它的 removed 属性是此前已移出的人数.
+        """
+        done = 0
+        for start in range(0, len(openids), BATCH_REMOVE_MAX):
+            batch = openids[start:start + BATCH_REMOVE_MAX]
+            try:
+                await self.api.batch_remove_members(group_openid, batch)
+            except QQApiError as exc:
+                exc.removed = done
+                raise
+            done += len(batch)
+            await self.db.executemany(
+                "DELETE FROM group_members WHERE bot_appid=? AND group_openid=?"
+                " AND user_openid=?",
+                [(self.appid, group_openid, openid) for openid in batch],
+            )
+            for openid in batch:
+                self._member_written.pop((group_openid, openid), None)
 
     def _cache_profile(self, openid: str, data: dict | None, until: float) -> None:
         if len(self._profiles) >= PROFILE_CACHE_MAX:

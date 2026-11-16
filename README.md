@@ -6,7 +6,7 @@
 
 **QQ 官方机器人 → OneBot v11**，简称 qbob
 
-[![version](https://img.shields.io/badge/version-0.1.16-12B7F5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.1.17-12B7F5)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 [![QQ Bot](https://img.shields.io/badge/QQ%20Bot-API%20v2-12B7F5)](https://bot.q.qq.com/wiki/)
@@ -141,7 +141,7 @@ journalctl -u qqbot-onebot -f
 ## OneBot 支持情况
 
 **支持**：发消息（文本、图片、语音、视频、文件、引用）、撤回、`get_msg`、消息历史、
-群信息、群禁言、入群申请审批、上传文件、取文件、登录信息等。
+群信息、群禁言、移出群成员、入群申请审批、上传文件、取文件、登录信息等。
 事件有群消息、私聊消息、bot 进退群、成员进退群、入群申请、好友添加、按钮点击。
 
 **降级**：
@@ -158,7 +158,7 @@ journalctl -u qqbot-onebot -f
 | 群成员列表、好友列表、群列表 | 只有发过言、私聊过、已启用的 |
 | 群荣誉、精华、公告、群文件列表等查询 | 返回空数据 |
 
-**无法实现**（调用时静默，返回 `retcode=1404`）：全员禁言、踢人、设管理员、改群名片、改群名、退群、头衔、
+**无法实现**（调用时静默，返回 `retcode=1404`）：全员禁言、设管理员、改群名片、改群名、退群、头衔、
 匿名、群公告与精华的写入、群文件管理、点赞、删好友、OCR、cookies 等。
 平台也不推送撤回、戳一戳、禁言等通知。
 

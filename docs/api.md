@@ -45,7 +45,7 @@
 | retcode | 含义 |
 |---|---|
 | 1400 | 参数/消息不合法, 或不支持的动作 |
-| 1403 | 目标群/用户未启用, 主动消息被拦 |
+| 1403 | 目标群/用户未启用, 主动消息被拦; 或 bot 没有该操作的权限(如移出群成员的开关没开) |
 | 1404 | 目标不存在、bot 已不在该群(随即自动禁用该群)、平台无此能力(「无法实现」), 或平台返回的其它 4xx 错误 |
 | 1500 | 平台或本服务内部错误, 可重试 |
 | 1502 | 频控或平台暂时故障, 稍后重试(暂时故障默认已在框架内重试过 2 次, 选项 `retry_transient`) |
@@ -183,18 +183,19 @@ QQ 的图文卡片: 标题 + 简介 + 一张封面, 点卡片打开链接。用�
 | `get_group_member_info` | 降级 | bot 自己的角色走官方接口(缓存 5 分钟, `no_cache` 强制刷新, 同群 30 秒内只查一次); 其他成员来自发言缓存 |
 | `get_group_member_list` | 降级 | 近 90 天发言过的成员, 最近发言的在前 |
 | `set_group_ban` | ✅ | 禁言单个成员(bot 须为群管) |
+| `set_group_kick` / `set_group_kick_members` | ✅ | 移出群成员, `user_id` 可传数组, 每批 20 人。需机器人管理端开「移除群成员」且群主给机器人开这个权限, 没开回 1403。`reject_add_request` 不生效(群黑名单接口只对白名单 bot 开放) |
 | `set_group_add_request` | ✅ | 入群申请审批 |
 | `set_friend_add_request` | 降级 | 平台无好友申请, 直接返回成功 |
 | `upload_group_file` / `upload_private_file` | ✅ | 以文件消息发出 |
 | `get_file` / `get_image` / `get_record` / `get_group_file_url` / `download_file` | ✅ | 本地文件不对外提供下载地址: `get_file` 给本地路径(可要 base64), `get_group_file_url` 返回 1404 |
 | `can_send_image` / `can_send_record` | ✅ | 恒为可发(媒体走分片直传) |
-| `.handle_quick_operation` | ✅ | 回复/撤回/禁言/审批 |
+| `.handle_quick_operation` | ✅ | 回复/撤回/移出/禁言/审批 |
 | `group_poke` / `friend_poke` / `send_poke` | 降级 | 发一条「@对方 戳了戳你」 |
 | `set_msg_emoji_like` | 降级 | 引用那条消息回一个 emoji |
 | `mark_msg_as_read` 等已读类 / `set_restart` / `clean_cache` | 降级 | 直接返回成功 |
 | `get_group_honor_info` / `get_essence_msg_list` / `get_group_essence` / `_get_group_notice` / `get_group_system_msg` / 群文件列表类 / `get_online_clients` | 降级 | 返回空数据 |
 | `get_additional_user_detail` / `get_additional_group_detail` | ✅ | 扩展: 头像地址与真实 openid, 见[扩展动作](#扩展动作) |
-| `set_group_whole_ban` / `set_group_kick` / `set_group_admin` / `set_group_card` / `set_group_name` / `set_group_leave` / `set_group_special_title` / `set_group_portrait` / 匿名类 | 无法实现 | |
+| `set_group_whole_ban` / `set_group_admin` / `set_group_card` / `set_group_name` / `set_group_leave` / `set_group_special_title` / `set_group_portrait` / 匿名类 | 无法实现 | |
 | 群公告写 / 精华消息写 / 群文件管理 | 无法实现 | |
 | `send_like` / `delete_friend` / `ocr_image` / `get_mini_app_ark` / `get_cookies` / `get_csrf_token` / `get_credentials` / 资料与状态设置 / AI 声聊 | 无法实现 | |
 | 其它未列出的动作 | 不支持 | 返回 `retcode=1400 unsupported action` |
