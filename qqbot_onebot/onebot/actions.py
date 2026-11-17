@@ -150,7 +150,8 @@ async def send_group_msg(bot: "BotInstance", params: dict) -> dict:
         return failed(1404, f"unknown group_id {params.get('group_id')}")
     if not _peer_allowed(bot, "group", group_openid):
         return _blocked("group", params.get("group_id"))
-    mid = await bot.sender.send("group", group_openid, params.get("message"))
+    mid = await bot.sender.send("group", group_openid, params.get("message"),
+                                wakeup=_flag(params, "is_wakeup"))
     return ok({"message_id": mid})
 
 
@@ -161,7 +162,8 @@ async def send_private_msg(bot: "BotInstance", params: dict) -> dict:
         return failed(1404, f"unknown user_id {params.get('user_id')}")
     if not _peer_allowed(bot, "private", user_openid):
         return _blocked("private", params.get("user_id"))
-    mid = await bot.sender.send("private", user_openid, params.get("message"))
+    mid = await bot.sender.send("private", user_openid, params.get("message"),
+                                wakeup=_flag(params, "is_wakeup"))
     return ok({"message_id": mid})
 
 
@@ -175,14 +177,16 @@ async def send_forward(bot: "BotInstance", params: dict) -> dict:
             return failed(1404, f"unknown group_id {params.get('group_id')}")
         if not _peer_allowed(bot, "group", group_openid):
             return _blocked("group", params.get("group_id"))
-        mid = await bot.sender.send("group", group_openid, messages)
+        mid = await bot.sender.send("group", group_openid, messages,
+                                    wakeup=_flag(params, "is_wakeup"))
     else:
         user_openid = _resolve_user(bot, params)
         if user_openid is None:
             return failed(1404, f"unknown user_id {params.get('user_id')}")
         if not _peer_allowed(bot, "private", user_openid):
             return _blocked("private", params.get("user_id"))
-        mid = await bot.sender.send("private", user_openid, messages)
+        mid = await bot.sender.send("private", user_openid, messages,
+                                    wakeup=_flag(params, "is_wakeup"))
     return ok({"message_id": mid, "forward_id": ""})
 
 
@@ -468,8 +472,12 @@ async def get_group_list(bot: "BotInstance", params: dict) -> dict:
     return ok(groups)
 
 
+def _flag(params: dict, name: str) -> bool:
+    return str(params.get(name)).lower() in ("true", "1")
+
+
 def _no_cache(params: dict) -> bool:
-    return str(params.get("no_cache")).lower() in ("true", "1")
+    return _flag(params, "no_cache")
 
 
 async def _self_member_role(bot: "BotInstance", group_openid: str,

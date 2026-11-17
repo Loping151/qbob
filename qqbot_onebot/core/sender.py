@@ -1214,11 +1214,14 @@ class Sender:
     # ---------------- 发送 ----------------
 
     async def send(self, chat_type: str, peer_openid: str, message,
-                   text_image: bool = True) -> int:
+                   text_image: bool = True, wakeup: bool = False) -> int:
         """发送一条 OneBot 消息, 返回首条物理消息的 mid.
 
         text_image=False 时不跑 payload_out 插件(内置指令要保持原样).
+        wakeup=True 按互动召回消息发(仅私聊, 见 _send_one).
         """
+        if wakeup and chat_type != "private":
+            raise SendError(1400, "is_wakeup 只用于私聊")
         message = normalize_message(message)
         self._check_repeat(chat_type, peer_openid, message)
         message = await plugins.pipe(
@@ -1293,11 +1296,15 @@ class Sender:
                     out = await plugins.first("payload_out", ctx, payload)
                     expanded.extend(out if out is not None else [payload])
                 payloads = expanded
+            if wakeup and len(payloads) > 1:
+                # 平台每个周期只收一条, 拆开发的话后几条必被拒, 名额还白用掉
+                raise SendError(
+                    1400, f"互动召回一个周期只能发一条, 这条消息要拆成 {len(payloads)} 条")
             for index, payload in enumerate(payloads):
                 qq_id, ref_idx = await self._send_one(
                     chat_type, peer_openid, payload,
                     prefer_mid=plan.prefer_reply_mid if index == 0 else None,
-                    cdn_urls=cdn_urls,
+                    cdn_urls=cdn_urls, wakeup=wakeup,
                 )
                 # 记下媒体字节大小: 引用 idx 对不上时按大小归属
                 sizes: list[int] = []
@@ -1556,13 +1563,16 @@ class Sender:
     async def _send_one(
         self, chat_type: str, peer_openid: str, payload: dict,
         prefer_mid: int | None, cdn_urls: dict[str, str] | None = None,
-        slot=_ACQUIRE, retry: int = 0,
+        slot=_ACQUIRE, retry: int = 0, wakeup: bool = False,
     ) -> tuple[str, str]:
         """返回 (平台消息id, ref_idx); cdn_urls 传了就记下 托管 URL -> QQ CDN 地址.
 
         卡片被拒改发文字时在 payload 上记 _fell_back(落库按实际发出的记).
         slot: 已拿到的被动回复名额(None = 主动); 默认现取.
         retry: 瞬时故障已重试的次数.
+        wakeup: 互动召回消息(body 带 is_wakeup). 用户主动找过 bot 之后的 30 天内,
+            当天 / 1-3 天 / 3-7 天 / 7-30 天 四个周期各能发一条; 不带被动回复凭据,
+            也不占主动消息的日配额, 能不能发由平台判.
         """
         body = dict(payload)
         media_info = body.pop("_media", None)
@@ -1588,7 +1598,8 @@ class Sender:
                     shown = url if url.startswith(("http://", "https://")) else ""
                     body = {"msg_type": 0,
                             "content": f"[文件] {shown or file_name or '文件'}"}
-                    return await self._send_one(chat_type, peer_openid, body, prefer_mid)
+                    return await self._send_one(chat_type, peer_openid, body, prefer_mid,
+                                                wakeup=wakeup)
                 raise SendError(1500, f"media upload failed: {exc}") from exc
             body["media"] = {"file_info": upload.get("file_info", "")}
             if cdn_urls is not None and url:
@@ -1597,17 +1608,20 @@ class Sender:
                     cdn_urls[url] = shown
             # content 可与 media 共存; 没有文字时别塞空格, 否则图上多一行空文本
 
-        if slot is _ACQUIRE:
+        if wakeup:
+            slot = None
+            body["is_wakeup"] = True
+        elif slot is _ACQUIRE:
             slot = await self.bot.store.acquire_reply_slot(
                 self.bot.appid, chat_type, peer_openid, prefer_mid=prefer_mid
             )
-        proactive = slot is None          # 只有主动消息吃日配额
+        proactive = slot is None and not wakeup   # 只有主动消息吃日配额
         if slot is not None:
             credential, seq, kind = slot
             # 事件凭据用 event_id 字段(不吃主动配额, 群里会自动 @ 触发者)
             body["event_id" if kind == "event" else "msg_id"] = credential
             body["msg_seq"] = seq
-        elif not self.bot.peer_allows_proactive(chat_type, peer_openid):
+        elif not wakeup and not self.bot.peer_allows_proactive(chat_type, peer_openid):
             raise SendError(1503, "无被动回复窗口且该会话主动消息未开通")
 
         try:
@@ -1625,7 +1639,8 @@ class Sender:
                     fallback["message_reference"] = card_reference
                 payload["_fell_back"] = fallback
                 return await self._send_one(chat_type, peer_openid, fallback,
-                                            prefer_mid, cdn_urls, slot=slot)
+                                            prefer_mid, cdn_urls, slot=slot,
+                                            wakeup=wakeup)
             if body.get("msg_type") == 2 and plain_fallback is not None and (
                 exc.code in MARKDOWN_REJECT_CODES
                 or (exc.status == 400 and exc.code not in _SESSION_CODES)
@@ -1697,7 +1712,7 @@ class Sender:
                     await asyncio.sleep(delay)
                     return await self._send_one(chat_type, peer_openid, payload,
                                                 prefer_mid, cdn_urls, slot=slot,
-                                                retry=retry + 1)
+                                                retry=retry + 1, wakeup=wakeup)
                 # 给可重试的 retcode
                 raise SendError(1502, f"平台暂时性故障: {exc.code} {exc.message}") from exc
             elif exc.code in NOT_IN_GROUP_CODES:
