@@ -69,6 +69,11 @@ class ServerConfig:
     recall_hint: bool = True
     # 平台报瞬时故障(「请稍后重试」类)时框架内重试 2 次(间隔 1s/3s), 再失败才回 1502 给后端
     retry_transient: bool = True
+    # 重复消息闸: 同一个 bot 在同一个会话里, repeat_window 秒内同一条消息最多发 repeat_limit 次, 再发回 1429
+    # (防后端死循环刷屏; 按内容逐条计数, 几条轮着发也算, 见 core/repeat.py)
+    repeat_guard: bool = True
+    repeat_limit: int = 10
+    repeat_window: int = 120
     # HTTP API 未指定 bot 时用的 appid; 为空则取第一个连上的 bot
     default_bot: str = ""
     # 管理台 bot 分组与新 bot 的默认分组(不存在时自动补上)
@@ -120,6 +125,7 @@ class ServerConfig:
 OPTION_FIELDS: dict[str, type] = {
     "superusers": list, "default_group_list_mode": str, "require_recv_all": bool,
     "ask_owner": bool, "recall_hint": bool, "retry_transient": bool,
+    "repeat_guard": bool, "repeat_limit": int, "repeat_window": int,
     "default_bot": str, "default_bot_group": str,
 }
 # update_mirror 故意不在内: 它决定 git pull 的源, 只许改 config.json

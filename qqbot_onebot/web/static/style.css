@@ -1332,6 +1332,7 @@ a.seg-card:hover, .seg-fwd:not(.gone):hover { border-color: var(--accent); }
 .help-card > label:not(.check-row) > input,
 .help-card > label:not(.check-row) > select,
 .help-card > label:not(.check-row) > textarea { display: block; width: 100%; margin-top: 4px; }
+.help-card > label.inline-nums > input { display: inline-block; width: 5.5em; margin: 0 4px; }
 /* 选项/插件/预设卡片: 说明文字后面紧跟下一个字段时留口气 */
 .help-card > .hint + label,
 .help-card > .hint + .check-row,

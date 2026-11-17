@@ -2585,6 +2585,12 @@ async function renderOptions(main) {
           "只影响这句提示发不发；没发提示就没有一次性撤回的入口")}
         ${check("retry_transient", "平台临时故障时自动重试",
           "平台回「请稍后重试」类错误时框架内再发 2 次（间隔 1 秒、3 秒），仍失败才报错给后端")}
+        ${check("repeat_guard", "拦下短时间内重复发送的同一条消息")}
+        <label class="inline-nums">同一个 bot 在同一个会话里，
+          <input name="repeat_window" type="number" inputmode="numeric" min="5" max="3600" value="${esc(o.repeat_window ?? "")}"${d}> 秒内同一条消息最多发
+          <input name="repeat_limit" type="number" inputmode="numeric" min="2" max="1000" value="${esc(o.repeat_limit ?? "")}"${d}> 次
+        </label>
+        <p class="hint">超出的不发，给后端回 1429；防后端插件死循环刷屏。按内容逐条计数，几条消息轮着发也算；图片、语音、视频、文件按文件内容认，引用的是哪条不计入内容</p>
       </section>
     </form>`;
   if (ro) return;
@@ -2596,6 +2602,9 @@ async function renderOptions(main) {
       ask_owner: form.ask_owner.checked,
       recall_hint: form.recall_hint.checked,
       retry_transient: form.retry_transient.checked,
+      repeat_guard: form.repeat_guard.checked,
+      repeat_limit: Number(form.repeat_limit.value),
+      repeat_window: Number(form.repeat_window.value),
       default_bot: form.default_bot.value,
       default_bot_group: form.default_bot_group.value,
       superusers: parseIdList(form.superusers.value),

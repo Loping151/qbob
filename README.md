@@ -6,7 +6,7 @@
 
 **QQ 官方机器人 → OneBot v11**，简称 qbob
 
-[![version](https://img.shields.io/badge/version-0.1.18-12B7F5)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-0.1.19-12B7F5)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![OneBot](https://img.shields.io/badge/OneBot-v11-black)](https://github.com/botuniverse/onebot-11)
 [![QQ Bot](https://img.shields.io/badge/QQ%20Bot-API%20v2-12B7F5)](https://bot.q.qq.com/wiki/)
@@ -128,6 +128,7 @@ journalctl -u qqbot-onebot -f
 - **询问号主**：默认开，关掉则 `创建bot` 授权后直接接入，号主记为「未知」
 - **一次性撤回提示**：合并转发被拆成多条发出时，附一句「可回复本消息一次性撤回」
 - **临时故障自动重试**：默认开，平台回「请稍后重试」类错误时框架内再发 2 次，仍失败才报错给后端
+- **重复消息拦截**：默认开，同一个 bot 在同一个会话里 120 秒内同一条消息最多发 10 次，再发回 1429 不发（防后端插件死循环刷屏；几条消息轮着发也算，图片等按文件内容认），次数与秒数可调
 - **全局 superuser**、**默认 bot**、**新 bot 的默认分组**（分组在「Bot 管理 → 分组」里建）
 
 ## 其他特性

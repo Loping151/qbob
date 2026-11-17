@@ -42,13 +42,14 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 
-from ..config import option
+from ..config import ServerConfig, option
 from ..idmap import is_virtual_id
 from ..plugin import HookContext, registry as plugins
 from ..qq.api import QQApiError
 from ..onebot import events as ob_events
 from ..onebot.segments import emoji_of, normalize_message, with_file_ids
 from . import avatars, cards, cdnkeys, forwardpage, textimg
+from .repeat import RepeatGuard, fingerprint
 from .quota import BEIJING
 from .textimg import TEXT_IMAGE_MIN_CHARS, extract_links, looks_like_markdown
 from .uploader import MediaTooLarge
@@ -592,6 +593,7 @@ class Sender:
         self._chat_locks = [asyncio.Lock() for _ in range(512)]
         # 群 openid -> 最近一次用掉 @全体 的北京日期(重启丢了无妨, 最多多被拒一次)
         self._at_all_day: dict[str, str] = {}
+        self.repeat = RepeatGuard()
 
     def _lock_for(self, chat_type: str, peer_openid: str) -> asyncio.Lock:
         """同一会话串行发送. 用固定数量的分片锁, 免得每会话一把锁只增不减."""
@@ -1217,9 +1219,10 @@ class Sender:
 
         text_image=False 时不跑 payload_out 插件(内置指令要保持原样).
         """
+        message = normalize_message(message)
+        self._check_repeat(chat_type, peer_openid, message)
         message = await plugins.pipe(
-            "message_out", HookContext(self.bot, chat_type, peer_openid),
-            normalize_message(message))
+            "message_out", HookContext(self.bot, chat_type, peer_openid), message)
         plan = await self.build_plan(message, chat_type, peer_openid)
         if plan.is_empty():
             # 带上段构成和降级清单, 插件才分得清原因
@@ -1334,6 +1337,21 @@ class Sender:
             await self._report_self(chat_type, peer_openid, peer_virtual,
                                     first_mid, recorded)
             return first_mid
+
+    def _check_repeat(self, chat_type: str, peer_openid: str,
+                      segments: list[dict]) -> None:
+        """重复消息闸(core/repeat.py): 同一条消息在窗口内发超了就回 1429, 不发."""
+        if not self._option("repeat_guard", True):
+            return
+        limit = int(self._option("repeat_limit", ServerConfig.repeat_limit))
+        window = int(self._option("repeat_window", ServerConfig.repeat_window))
+        if limit < 1 or window < 1:
+            return
+        mark = fingerprint(segments, self.bot.media)
+        if self.repeat.count(chat_type, peer_openid, mark, window) > limit:
+            raise SendError(
+                1429, f"同一条消息 {window} 秒内已发 {limit} 次, 不再发送"
+                      "(疑似后端循环; 管理台「选项 → 发送」可调)")
 
     async def _stash_inline_media(self, segments: list[dict],
                                   file_urls: dict[str, str]) -> None:

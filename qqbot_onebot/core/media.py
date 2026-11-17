@@ -135,6 +135,27 @@ class MediaStore:
                 return path.read_bytes(), path.name
         return None, ""
 
+    def peek(self, file_field: str, limit: int) -> tuple[int, bytes] | None:
+        """file 字段 -> (总字节数, 开头 limit 字节), 只读开头、不把整个文件读进内存; 外站 URL 或认不出返回 None."""
+        if file_field.startswith("base64://"):
+            chars = -(-limit // 3) * 4          # 只解开头这一段
+            try:
+                head = base64.b64decode(file_field[9:9 + chars], validate=False)
+            except (binascii.Error, ValueError):
+                return None
+            return (len(file_field) - 9) * 3 // 4 - file_field[-2:].count("="), head[:limit]
+        if file_field.startswith(LOCAL_SCHEME):
+            path = self.resolve(self.parse_token(file_field) or "")
+        elif file_field.startswith(("file://", "/")):
+            path = Path(file_field[7:] if file_field.startswith("file://") else file_field)
+        else:
+            path = None
+        try:
+            with path.open("rb") as handle:
+                return path.stat().st_size, handle.read(limit)
+        except (OSError, AttributeError):       # 外链/认不出(None)、不存在、不是文件、没权限
+            return None
+
     def parse_token(self, url: str) -> str | None:
         """URL 指向本媒体库则返回 token; 只看形状, 不查文件是否存在."""
         if not url:

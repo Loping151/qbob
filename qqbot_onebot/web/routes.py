@@ -933,6 +933,11 @@ def build_router() -> APIRouter:
             value = body[key]
             if kind is bool:
                 value = bool(value)
+            elif kind is int:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail=f"{key} 必须是整数")
             elif kind is list:
                 try:
                     value = [int(x) for x in (value or [])]
@@ -943,6 +948,10 @@ def build_router() -> APIRouter:
             updates[key] = value
         if updates.get("default_group_list_mode", "white") not in ("white", "black"):
             raise HTTPException(status_code=400, detail="default_group_list_mode 取值非法")
+        if not 2 <= updates.get("repeat_limit", 2) <= 1000:
+            raise HTTPException(status_code=400, detail="重复消息上限须在 2 ~ 1000 次之间")
+        if not 5 <= updates.get("repeat_window", 5) <= 3600:
+            raise HTTPException(status_code=400, detail="重复消息窗口须在 5 ~ 3600 秒之间")
         group = updates.get("default_bot_group")
         if group is not None and group not in manager.config.bot_groups:
             raise HTTPException(status_code=400, detail="分组不存在")
