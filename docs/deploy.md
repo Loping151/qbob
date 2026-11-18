@@ -35,8 +35,16 @@ mkdir -p data && cp config.example.json data/config.json
 | `root_redirect_url` | 空 | 有人访问公网面的根路径时跳转到哪里 |
 | `message_ttl_days` | 7 | 消息记录保留天数 |
 | `media_ttl_hours` | 1 | 本地媒体保留小时数 |
+| `media_copy_max_mb` | 10 | 后端给的本地文件（`file://` 或绝对路径）超过这么多 MB 就不复制进媒体库，改为链接原文件；0 = 一律不复制。代价见表下 |
 | `log_file` / `log_max_mb` / `log_backups` | `data/logs/qqbot.log` / 10 / 4 | 日志文件与轮转上限；`log_file` 留空则只输出到终端 |
 | `update_repo` / `update_mirror` / `update_check_hours` | 本仓库 / 空 / 6 | 更新检查，见[更新](#更新)；`update_check_hours` 为 0 关闭 |
+
+`media_copy_max_mb`：发送本身不依赖媒体库里的这份（发完才返回）。它的其它用途都在发出后一小时内：
+`get_file` / `get_image` 取回、把消息里的媒体再发一次、管理台聊天室预览。链接不写数据：
+
+- 与媒体库在同一文件系统时用硬链接，后端删掉原文件也不影响。硬链接与原文件是同一个 inode，续期会刷新原文件的修改时间。
+- 跨文件系统用符号链接，后端删了原文件，上面三处就当这条媒体已过期。
+- 两种都怕后端在原路径上直接改写文件（截断重写），已入库的内容会跟着变。
 
 全局选项（superusers、群启用方式等）也存在这个文件里，但建议在管理台「设置 → 选项」里改。
 后端预设（一组 OneBot 反向 WebSocket 地址，新 bot 按默认预设接入）存在 `data/provision.json`，
