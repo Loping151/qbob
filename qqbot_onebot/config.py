@@ -48,10 +48,6 @@ class ServerConfig:
     db_path: str = str(PROJECT_ROOT / "data" / "qqbot_onebot.db")
     media_dir: str = str(PROJECT_ROOT / "data" / "media")
     media_ttl_hours: int = 1
-    # 后端给的本地文件(file:// 或绝对路径)超过这么多 MB 就不复制进媒体库, 改为链接原文件
-    # (同一文件系统硬链接, 否则符号链接); 0 = 一律链接. 发送本身不受影响(发完才返回);
-    # 代价见 docs/deploy.md「配置文件」
-    media_copy_max_mb: float = 10
     message_ttl_days: int = 7
     session_secret: str = ""
     log_level: str = "INFO"

@@ -21,7 +21,6 @@
   "db_path": "./data/qqbot_onebot.db",
   "media_dir": "./data/media",
   "media_ttl_hours": 1,
-  "media_copy_max_mb": 10,
   "message_ttl_days": 7,
   "session_secret": "",
   "log_level": "INFO",

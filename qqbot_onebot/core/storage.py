@@ -32,8 +32,7 @@ def _dir_stats(directory: Path) -> tuple[int, int]:
     if directory.is_dir():
         for path in directory.rglob("*"):
             if path.is_file():
-                # 符号链接链进来的媒体不占本目录空间, 只计个数
-                total += 0 if path.is_symlink() else _size(path)
+                total += _size(path)
                 count += 1
     return total, count
 

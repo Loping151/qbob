@@ -34,17 +34,17 @@ mkdir -p data && cp config.example.json data/config.json
 | `forward_base_url` | 空 | 转发网页单独用的地址（也可在插件里填） |
 | `root_redirect_url` | 空 | 有人访问公网面的根路径时跳转到哪里 |
 | `message_ttl_days` | 7 | 消息记录保留天数 |
+| `media_dir` | `data/media` | 本地媒体目录；可以指向内存盘，见表下 |
 | `media_ttl_hours` | 1 | 本地媒体保留小时数 |
-| `media_copy_max_mb` | 10 | 后端给的本地文件（`file://` 或绝对路径）超过这么多 MB 就不复制进媒体库，改为链接原文件；0 = 一律不复制。代价见表下 |
 | `log_file` / `log_max_mb` / `log_backups` | `data/logs/qqbot.log` / 10 / 4 | 日志文件与轮转上限；`log_file` 留空则只输出到终端 |
 | `update_repo` / `update_mirror` / `update_check_hours` | 本仓库 / 空 / 6 | 更新检查，见[更新](#更新)；`update_check_hours` 为 0 关闭 |
 
-`media_copy_max_mb`：发送本身不依赖媒体库里的这份（发完才返回）。它的其它用途都在发出后一小时内：
-`get_file` / `get_image` 取回、把消息里的媒体再发一次、管理台聊天室预览。链接不写数据：
+`media_dir`：后端发来的图片、视频、语音（base64 或本地文件）都会先存一份到这里。发送时从这里上传；发出后约一小时内，`get_file` 取回、
+把消息里的媒体再发一次、管理台聊天室预览也从这里读。不想让它写盘，可以指向内存盘（tmpfs），如 `/dev/shm/qqbot_onebot_media`：
 
-- 与媒体库在同一文件系统时用硬链接，后端删掉原文件也不影响。硬链接与原文件是同一个 inode，续期会刷新原文件的修改时间。
-- 跨文件系统用符号链接，后端删了原文件，上面三处就当这条媒体已过期。
-- 两种都怕后端在原路径上直接改写文件（截断重写），已入库的内容会跟着变。
+- 占用的内存约为两小时的媒体量（每小时清理一次），机器重启后清空不影响使用。
+- 要在配置里写这个路径，不要把 `data/media` 换成指向那里的软链：重启后软链悬空，服务会启动失败。
+- 容器里的 `/dev/shm` 往往很小（Docker 默认 64 MB），满了媒体写不进去、发送会失败，这种环境别用。
 
 全局选项（superusers、群启用方式等）也存在这个文件里，但建议在管理台「设置 → 选项」里改。
 后端预设（一组 OneBot 反向 WebSocket 地址，新 bot 按默认预设接入）存在 `data/provision.json`，

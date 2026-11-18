@@ -34,7 +34,7 @@ class BotManager:
         self.idmap = IdMap(self.db)
         self.access = AccessControl(self.db)
         self.store = MessageStore(self.db)
-        self.media = MediaStore(config.media_dir, config.media_ttl_hours, config.media_copy_max_mb)
+        self.media = MediaStore(config.media_dir, config.media_ttl_hours)
         # 全部 bot 共用: 同一新字段只记 SAMPLES 份, 不是每个 bot 各记一遍
         self.fieldwatch = FieldWatch(self.db, UnparsedLog(
             unparsed_files(Path(config.db_path).parent)[0]))
