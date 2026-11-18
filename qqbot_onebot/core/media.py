@@ -15,6 +15,7 @@ import secrets
 import stat
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
 logger = logging.getLogger("qqbot.media")
 
@@ -61,9 +62,19 @@ LOCAL_SCHEME = "media://"
 
 
 def _local_path(file_field: str) -> Path | None:
-    """file:// 或本地绝对路径 -> Path; 其它形式返回 None(不查文件是否存在)."""
+    """file:// 或本地绝对路径 -> Path; 其它形式返回 None.
+
+    file:// 按规范是百分号编码的(NoneBot 的 Path.as_uri() 会把中文、空格编码), 但也有后端
+    直接拼未编码的路径: 原样的不存在才按解码后的找.
+    """
     if file_field.startswith("file://"):
-        return Path(file_field[7:])
+        raw = file_field[7:]
+        path = Path(raw)
+        if "%" in raw and not path.exists():
+            decoded = Path(unquote(raw))
+            if decoded.exists():
+                return decoded
+        return path
     if file_field.startswith("/"):
         return Path(file_field)
     return None
