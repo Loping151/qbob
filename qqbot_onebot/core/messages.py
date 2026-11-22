@@ -17,8 +17,9 @@ from ..onebot.segments import with_file_ids
 
 logger = logging.getLogger("qqbot.messages")
 
-GROUP_PASSIVE_WINDOW = 300       # 5 min
+GROUP_PASSIVE_WINDOW = 3600      # 群消息的 msg_id: 60 分钟
 GROUP_PASSIVE_BUDGET = 5
+GROUP_EVENT_WINDOW = 300         # 群通知事件的 event_id: 按 5 分钟算(保守值)
 C2C_PASSIVE_WINDOW = 3600        # 60 min
 C2C_PASSIVE_BUDGET = 4
 MID_MIN, MID_MAX = 10**8, 2**31 - 10**6  # int32 内, 起始随机
@@ -237,7 +238,7 @@ class MessageStore:
         if not event_id:
             return
         ts = ts or int(time.time())
-        window = GROUP_PASSIVE_WINDOW if chat_type == "group" else C2C_PASSIVE_WINDOW
+        window = GROUP_EVENT_WINDOW if chat_type == "group" else C2C_PASSIVE_WINDOW
         budget = GROUP_PASSIVE_BUDGET if chat_type == "group" else C2C_PASSIVE_BUDGET
         await self.db.execute(
             "INSERT INTO passive_events (bot_appid, chat_type, peer_openid,"
@@ -247,20 +248,39 @@ class MessageStore:
              ts, ts + window, budget),
         )
 
-    async def revoke_reply_slot(self, bot_appid: str, slot: tuple) -> None:
-        """平台拒了这个被动凭据(过期/无效/该事件不能回复): 作废, 之后不再选它."""
+    async def revoke_reply_slot(self, bot_appid: str, slot: tuple,
+                                chat: tuple[str, str] | None = None) -> int:
+        """平台拒了这个被动凭据(过期/无效/该事件不能回复): 作废, 之后不再选它.
+
+        返回凭据的时间戳(事件凭据、找不到时为 0).
+        chat=(chat_type, peer_openid): 平台是按超时拒的, 该会话里更早的消息凭据必然也超时,
+        一并作废, 免得一条条试到头.
+        """
         credential, _, kind = slot
         if kind == "event":
-            sql = "UPDATE passive_events SET expire=0 WHERE bot_appid=? AND event_id=?"
-            args: tuple = (bot_appid, credential)
-        else:
-            # 凭据只会取自窗口内的入站消息(passive_expire = ts + 窗口), 按时间窗定位
-            sql = ("UPDATE messages INDEXED BY idx_msg_ts SET passive_expire=0"
-                   " WHERE ts >= ? AND bot_appid=? AND qq_msg_id=? AND direction='in'")
-            since = int(time.time()) - max(GROUP_PASSIVE_WINDOW, C2C_PASSIVE_WINDOW) - SEEN_TS_SLACK
-            args = (since, bot_appid, credential)
+            async with self._lock:
+                await self.db.execute(
+                    "UPDATE passive_events SET expire=0 WHERE bot_appid=? AND event_id=?",
+                    (bot_appid, credential))
+            return 0
+        # 凭据只会取自窗口内的入站消息(passive_expire = ts + 窗口), 按时间窗定位
+        since = int(time.time()) - max(GROUP_PASSIVE_WINDOW, C2C_PASSIVE_WINDOW) - SEEN_TS_SLACK
         async with self._lock:
-            await self.db.execute(sql, args)
+            row = await self.db.fetchone(
+                "SELECT ts FROM messages INDEXED BY idx_msg_ts"
+                " WHERE ts >= ? AND bot_appid=? AND qq_msg_id=? AND direction='in' LIMIT 1",
+                (since, bot_appid, credential))
+            await self.db.execute(
+                "UPDATE messages INDEXED BY idx_msg_ts SET passive_expire=0"
+                " WHERE ts >= ? AND bot_appid=? AND qq_msg_id=? AND direction='in'",
+                (since, bot_appid, credential))
+            if row is not None and chat is not None:
+                await self.db.execute(
+                    "UPDATE messages SET passive_expire=0"
+                    " WHERE bot_appid=? AND chat_type=? AND peer_openid=?"
+                    " AND ts BETWEEN ? AND ? AND direction='in' AND passive_expire > 0",
+                    (bot_appid, chat[0], chat[1], since, row["ts"]))
+        return row["ts"] if row is not None else 0
 
     async def acquire_reply_slot(
         self,
@@ -268,10 +288,13 @@ class MessageStore:
         chat_type: str,
         peer_openid: str,
         prefer_mid: int | None = None,
+        borrow_user: int = 0,
     ) -> tuple[str, int, str] | None:
-        """原子占用一个被动回复名额, 返回 (id, msg_seq, 'msg'|'event'), 无可用则 None.
+        """原子占用一个被动回复名额, 返回 (id, msg_seq, 'msg'|'event'|'group_msg'), 无可用则 None.
 
         消息与事件凭据取较新者; 指定 prefer_mid 时消息凭据优先.
+        borrow_user: 私聊对象的虚拟号. 私聊自己没有凭据时借他在群里发的消息('group_msg'):
+        群消息的 msg_id 可以拿来私聊回复它的发送者, 次数与群内回复共用, 所以记在同一行上.
         """
         async with self._lock:
             now = int(time.time())
@@ -313,10 +336,22 @@ class MessageStore:
                     (seq, event_row["id"]),
                 )
                 return event_row["event_id"], seq, "event"
+            kind = "msg"
+            if row is None and chat_type == "private" and borrow_user:
+                row = await self.db.fetchone(
+                    "SELECT mid, qq_msg_id, seq_used, passive_budget, ts FROM messages"
+                    " INDEXED BY idx_msg_ts"
+                    " WHERE ts > ? AND bot_appid=? AND chat_type='group' AND user_virtual=?"
+                    " AND direction='in' AND qq_msg_id!='' AND passive_expire > ?"
+                    " AND seq_used < passive_budget"
+                    " ORDER BY ts DESC LIMIT 1",
+                    (now - GROUP_PASSIVE_WINDOW, bot_appid, borrow_user, now),
+                )
+                kind = "group_msg"
             if row is None:
                 return None
             seq = row["seq_used"] + 1
             await self.db.execute(
                 "UPDATE messages SET seq_used=? WHERE mid=?", (seq, row["mid"])
             )
-            return row["qq_msg_id"], seq, "msg"
+            return row["qq_msg_id"], seq, kind

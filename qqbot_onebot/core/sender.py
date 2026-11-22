@@ -77,6 +77,8 @@ PROACTIVE_DENIED_CODES = {40034105}
 # 被动凭据过期/无效/该事件不支持回复: 换主动或等下条消息. 40034031 msgid已经过期 表外
 PASSIVE_EXPIRED_CODES = {40034128, 40034005, 304103,
                          40034024, 40034025, 40034026, 40034027, 40034031}
+# 其中按超时(或次数)拒的: 同一会话里更早的消息凭据也不必再试
+PASSIVE_TIMEOUT_CODES = {40034128, 40034005, 40034031}
 # bot 在该群已无资格说话: 不重试, 复查群状态(确认不在群即自动禁用).
 # 11293 机器人非群成员 / 11255 无效群 openid 表外, 发送与上传都会报
 NOT_IN_GROUP_CODES = {40054003, 40034101, 11293, 11255}
@@ -91,7 +93,7 @@ TRANSIENT_CODES = {50055001, 50055006, 40034004, 40054016,
 # 被动回复沿用同一 msg_id/msg_seq, 前一次其实已送达时平台按 msg_seq 去重, 不会发两条
 TRANSIENT_RETRY_DELAYS = (1.0, 3.0)
 DEDUP_CODE = 40054005           # 消息被去重, 请检查请求 msgseq
-# 消息本身有问题: 不复查也不重试. 后一行是单聊表的(召回/订阅按钮/输入中状态本服务不用)
+# 消息本身有问题: 不复查也不重试. 后一行是单聊表的(互动召回的周期名额用完 / 订阅按钮 / 输入中状态)
 BAD_MESSAGE_CODES = {304061, 340069, 305007, 304064, 304080,
                      40054007, 40054005, 40034006, 40034029,
                      40034106, 40034108, 40034109,
@@ -1560,6 +1562,27 @@ class Sender:
         return ([text_payload, media_payload] if group["text_first"]
                 else [media_payload, text_payload])
 
+    async def _drop_slot(self, chat_type: str, peer_openid: str, slot: tuple,
+                         exc: QQApiError):
+        """平台拒了这个被动凭据: 返回重发时用的 slot(_ACQUIRE = 另取一个, None = 走主动).
+
+        借来私聊的群消息凭据不作废(群里照样能用), 这条直接改走主动;
+        其余的作废, 按超时拒的连同该会话更早的消息凭据一起.
+        """
+        credential, seq, kind = slot
+        if kind == "group_msg":
+            logger.info("[%s] 群消息凭据用于私聊被拒(%s %s), 改走主动",
+                        self.bot.appid, exc.code, exc.message)
+            return None
+        ts = await self.bot.store.revoke_reply_slot(
+            self.bot.appid, slot,
+            chat=(chat_type, peer_openid) if exc.code in PASSIVE_TIMEOUT_CODES else None)
+        logger.info("[%s] 被动凭据被拒(%s %s): %s 第 %d 次%s, 作废后重发",
+                    self.bot.appid, exc.code, exc.message,
+                    "事件" if kind == "event" else "消息", seq,
+                    f", 收到已 {int(time.time()) - ts} 秒" if ts else "")
+        return _ACQUIRE
+
     async def _send_one(
         self, chat_type: str, peer_openid: str, payload: dict,
         prefer_mid: int | None, cdn_urls: dict[str, str] | None = None,
@@ -1613,7 +1636,9 @@ class Sender:
             body["is_wakeup"] = True
         elif slot is _ACQUIRE:
             slot = await self.bot.store.acquire_reply_slot(
-                self.bot.appid, chat_type, peer_openid, prefer_mid=prefer_mid
+                self.bot.appid, chat_type, peer_openid, prefer_mid=prefer_mid,
+                borrow_user=(await self.bot.virtual_for_peer(chat_type, peer_openid)
+                             if chat_type == "private" else 0),
             )
         proactive = slot is None and not wakeup   # 只有主动消息吃日配额
         if slot is not None:
@@ -1659,13 +1684,13 @@ class Sender:
                         resp = await self._post_message(chat_type, peer_openid, body)
                     elif exc2.code in PASSIVE_EXPIRED_CODES and slot is not None:
                         # 纯文本这次才暴露凭据不行: 作废后照纯文本重发(markdown 已经被拒过)
-                        await self.bot.store.revoke_reply_slot(self.bot.appid, slot)
                         plain = {k: v for k, v in payload.items()
                                  if k not in ("markdown", "_plain_fallback")}
                         plain.update(msg_type=0, content=body["content"])
                         payload["_fell_back"] = plain
-                        return await self._send_one(chat_type, peer_openid, plain,
-                                                    prefer_mid, cdn_urls)
+                        return await self._send_one(
+                            chat_type, peer_openid, plain, prefer_mid, cdn_urls,
+                            slot=await self._drop_slot(chat_type, peer_openid, slot, exc2))
                     else:
                         raise SendError(
                             1500 if exc2.status >= 500 else 1404,
@@ -1731,17 +1756,22 @@ class Sender:
             elif exc.code in PASSIVE_EXPIRED_CODES:
                 self.bot.note_send_error("passive_expired", exc.code, peer_openid)
                 if slot is not None:
-                    # 凭据被拒(多是入群/开主动消息这类通知事件的 event_id: 无效或不能回复):
-                    # 作废它再发, 自动换下一个凭据或走主动; 每轮作废一个, 必然收敛
-                    await self.bot.store.revoke_reply_slot(self.bot.appid, slot)
-                    return await self._send_one(chat_type, peer_openid, payload,
-                                                prefer_mid, cdn_urls)
+                    # 凭据被拒(通知事件的 event_id 无效或不能回复 / 消息的 msg_id 过期):
+                    # 作废它再发, 自动换下一个凭据或走主动; 每轮至少作废一个, 必然收敛
+                    return await self._send_one(
+                        chat_type, peer_openid, payload, prefer_mid, cdn_urls,
+                        slot=await self._drop_slot(chat_type, peer_openid, slot, exc))
                 raise SendError(1503, f"被动回复窗口已过: {exc.message}") from exc
             elif exc.code in BAD_MESSAGE_CODES:
                 self.bot.note_send_error("bad_message", exc.code, peer_openid)
                 raise SendError(1400, f"消息不合法: {exc.code} {exc.message}") from exc
             else:
                 self.bot.note_send_error("other", exc.code, peer_openid)
+                if slot is not None and slot[2] == "group_msg":
+                    # 借群消息凭据私聊时撞上没归类的错误码: 照没有凭据时那样走主动再发一次
+                    return await self._send_one(
+                        chat_type, peer_openid, payload, prefer_mid, cdn_urls,
+                        slot=await self._drop_slot(chat_type, peer_openid, slot, exc))
                 raise SendError(
                     1500 if exc.status >= 500 else 1404,
                     f"qq api error {exc.code}: {exc.message}",
