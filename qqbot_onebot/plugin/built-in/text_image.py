@@ -1,6 +1,6 @@
 """长文本转图片: 超阈值的文本按 markdown 渲染成图, 链接另发一条(图里点不了).
 
-兑换码类、带指令按钮、内置指令回复不转; 渲染失败原样发文本. 依赖本机 chrome/chromium。
+兑换码类、带指令按钮、内置指令回复不转; 渲染失败原样发文本. Pillow 直接排版, 要有中文字体(见 docs/deploy.md)。
 """
 
 from qqbot_onebot.core.textimg import TEXT_IMAGE_MIN_CHARS

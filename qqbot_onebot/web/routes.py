@@ -131,11 +131,7 @@ def media_previews(manager, segments, depth: int = 0) -> list[dict]:
         if not url.startswith(("http://", "https://")):
             out.append({"type": kind, "url": "", "name": name, "state": "unavailable"})
             continue
-        if cdnkeys.is_cdn(url):
-            rkey = cdnkeys.fresh().get(cdnkeys.appid_of(url))
-            if rkey:
-                url = cdnkeys.with_rkey(url, rkey)
-        out.append({"type": kind, "url": url, "name": name, "state": "ok"})
+        out.append({"type": kind, "url": cdnkeys.refresh(url), "name": name, "state": "ok"})
     return out
 
 

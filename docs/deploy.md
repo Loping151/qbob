@@ -12,8 +12,14 @@ mkdir -p data && cp config.example.json data/config.json
 
 - 首次启动会创建管理员 `admin`，随机密码写在 `data/initial_admin_password.txt`。首次登录后管理台会提示改密码，
   改完这个文件自动删除。之后任何账号都可以点右上角自己的用户名改密码。
-- 长文本转图片需要 `PATH` 里有 `google-chrome` 或 `chromium`（名字要对上，Ubuntu 的 `chromium-browser` 不认），
-  没有就照常发文字；发非 silk 格式的语音需要 `ffmpeg`。
+- 长文本转图片用 Pillow 直接画，不需要浏览器，但要有中文字体：Debian/Ubuntu 装 `fonts-noto-cjk`
+  （简繁日韩字形都在里面），彩色 emoji 再装 `fonts-noto-color-emoji`（可选；没有时 emoji 用
+  Symbola、Noto Sans Symbols2 等符号字体画成黑白的，这些也没有就是方框）。
+  阿拉伯文、泰文、天城文等其他文字按 fontconfig 找字体，装 `fonts-noto-core` 基本都有。
+  找不到中文字体就照常发文字。字体也可以用环境变量指定（文件路径，ttc 可加 `#序号`）：
+  `QBOB_TEXTIMG_FONT`、`QBOB_TEXTIMG_FONT_BOLD`、`QBOB_TEXTIMG_FONT_MONO`、`QBOB_TEXTIMG_FONT_EMOJI`，
+  第一次转图时日志里有一行 `textimg 字体: ...` 写明实际用了哪些。
+- 发非 silk 格式的语音需要 `ffmpeg`。
 - 所有运行数据（配置、数据库、媒体缓存、日志）都在 `data/`，备份和迁移只管这个目录。
 
 不用 uv 也行（需要 Python 3.12+）：`python3 -m venv .venv && .venv/bin/pip install -e .`，再用 `.venv/bin/python -m qqbot_onebot --config data/config.json` 启动。

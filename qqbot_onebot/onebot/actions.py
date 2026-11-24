@@ -19,7 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .. import __version__
-from ..core import avatars
+from ..core import avatars, cdnkeys
 from ..core.sender import POKE_TEXT, SendError
 from ..qq.api import REMOVE_DENIED_CODES, QQApiError
 from .segments import emoji_of, segments_to_cq
@@ -248,14 +248,15 @@ async def get_msg(bot: "BotInstance", params: dict) -> dict:
         return failed(1404, f"unknown message_id {mid}")
     is_group = record["chat_type"] == "group"
     sender = _record_sender(bot, record)
+    content = _record_content(record)
     data = {
         "time": record["ts"],
         "message_type": "group" if is_group else "private",
         "message_id": mid,
         "real_id": mid,
         "sender": sender,
-        "message": record["content"],
-        "raw_message": segments_to_cq(record["content"]),
+        "message": content,
+        "raw_message": segments_to_cq(content),
         "message_seq": mid,
         # napcat 口径顶层恒带 user_id, 否则插件 reply.user_id 会 AttributeError
         "user_id": int(sender.get("user_id") or record["user_virtual"] or 0),
@@ -271,20 +272,20 @@ async def get_forward_msg(bot: "BotInstance", params: dict) -> dict:
     fid = str(params.get("id") or params.get("message_id") or "")
     if fid:
         row = await bot.db.fetchone(
-            "SELECT nodes FROM forwards WHERE id=? AND bot_appid=?",
+            "SELECT nodes, ts FROM forwards WHERE id=? AND bot_appid=?",
             (fid, bot.appid),
         )
         if row is not None:
-            return ok({"messages": json.loads(row["nodes"])})
+            return ok({"messages": cdnkeys.refresh_tree(json.loads(row["nodes"]), row["ts"])})
         # 也可能给的是 OneBot int message_id, 用其平台 id 再查一次
         record = await bot.store.get_by_mid(_int_of(fid))
         if record and record["bot_appid"] == bot.appid:
             row = await bot.db.fetchone(
-                "SELECT nodes FROM forwards WHERE id=? AND bot_appid=?",
+                "SELECT nodes, ts FROM forwards WHERE id=? AND bot_appid=?",
                 (record["qq_msg_id"], bot.appid),
             )
             if row is not None:
-                return ok({"messages": json.loads(row["nodes"])})
+                return ok({"messages": cdnkeys.refresh_tree(json.loads(row["nodes"]), row["ts"])})
     # 未命中回空集合, 别让插件流程炸
     logger.info("[%s] get_forward_msg 未命中 id=%s", bot.appid, fid[:48])
     return ok({"messages": []})
@@ -334,8 +335,16 @@ def _record_sender(bot: "BotInstance", record: dict) -> dict:
             "role": "member"}
 
 
+def _record_content(record: dict) -> list:
+    """库里的消息段, 直链换新 rkey(引用回查多是旧消息, 原 rkey 早过期). 收到的消息 rkey
+    是平台当时签的, 按收到时间算; 发出的用的是当时手上那把(可能已用了一阵), 一律换."""
+    issued = record["ts"] if record["direction"] == "in" else None
+    return cdnkeys.refresh_tree(record["content"], issued)
+
+
 def _history_item(bot: "BotInstance", record: dict) -> dict:
     sender = _record_sender(bot, record)
+    content = _record_content(record)
     item = {
         "time": record["ts"],
         "message_type": record["chat_type"] if record["chat_type"] == "group" else "private",
@@ -343,8 +352,8 @@ def _history_item(bot: "BotInstance", record: dict) -> dict:
         "real_id": record["mid"],
         "message_seq": record["mid"],
         "sender": sender,
-        "message": record["content"],
-        "raw_message": segments_to_cq(record["content"]),
+        "message": content,
+        "raw_message": segments_to_cq(content),
         "user_id": record["user_virtual"],
         "self_id": bot.self_id,
         "post_type": "message",
@@ -769,7 +778,7 @@ def _local_token(bot: "BotInstance", file_id: str) -> str | None:
 
 @action("get_group_file_url", "get_private_file_url")
 async def get_group_file_url(bot: "BotInstance", params: dict) -> dict:
-    file_id = str(params.get("file_id") or params.get("file") or "")
+    file_id = cdnkeys.refresh(str(params.get("file_id") or params.get("file") or ""))
     if file_id.startswith(("http://", "https://")):
         return ok({"url": file_id})
     if _local_token(bot, file_id) is not None:
@@ -779,7 +788,7 @@ async def get_group_file_url(bot: "BotInstance", params: dict) -> dict:
 
 @action("get_file")
 async def get_file(bot: "BotInstance", params: dict) -> dict:
-    file_id = str(params.get("file_id") or params.get("file") or "")
+    file_id = cdnkeys.refresh(str(params.get("file_id") or params.get("file") or ""))
     want_base64 = str(params.get("type", "")) == "base64"
     name = file_id.rsplit("/", 1)[-1][:120]
     if file_id.startswith(("http://", "https://")):

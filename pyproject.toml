@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qqbot-onebot"
-version = "0.2.4"
+version = "0.2.5"
 description = "QQ official bot (api-v2) -> OneBot v11 adapter with multi-bot management"
 requires-python = ">=3.12"
 license = "AGPL-3.0-only"
@@ -19,7 +19,7 @@ dependencies = [
     "cryptography>=43",
     "qrcode>=8",
     "python-multipart>=0.0.9",   # 管理台聊天室的文件上传
-    "pillow>=13.0.0",                # 长文本转图片: 裁掉截图底部的空白
+    "pillow>=13.0.0",                # 长文本转图片: 排版和绘制都用它
 ]
 
 [project.optional-dependencies]
@@ -28,9 +28,9 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24", "httpx>=0.27"]
 [tool.setuptools.packages.find]
 include = ["qqbot_onebot*"]
 
-# 非 .py 包的资源: 内置插件目录名带连字符(不是 python 包), 前端与渲染样式
+# 非 .py 包的资源: 内置插件目录名带连字符(不是 python 包), 前端
 [tool.setuptools.package-data]
-qqbot_onebot = ["plugin/built-in/*.py", "core/assets/*", "web/static/*"]
+qqbot_onebot = ["plugin/built-in/*.py", "web/static/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

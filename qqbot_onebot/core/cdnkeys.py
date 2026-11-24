@@ -71,6 +71,34 @@ def with_rkey(url: str, rkey: str) -> str:
     return f"{url}&rkey={rkey}"
 
 
+def refresh(url: str, issued: float | None = None, now: float | None = None) -> str:
+    """回查旧消息时给直链换上手上最新的 rkey: 没带 rkey 的(自己发的图)、签发超过
+    RKEY_MAX_AGE 或不知道签发时间的换; 没有新 rkey 或不是带 fileid 的直链原样返回."""
+    if not is_cdn(url) or not _FILEID_RE.search(url):
+        return url
+    now = time.time() if now is None else now
+    if issued is not None and now - issued <= RKEY_MAX_AGE and _RKEY_VALUE_RE.search(url):
+        return url
+    rkey = fresh(now).get(appid_of(url))
+    return with_rkey(url, rkey) if rkey else url
+
+
+# 消息段/转发节点里放直链的字段(file_id 同 url, 后端可能拿它直接下; image 是卡片封面)
+_URL_FIELDS = frozenset({"url", "file", "file_id", "image"})
+
+
+def refresh_tree(obj, issued: float | None = None, now: float | None = None):
+    """消息段列表 / 转发节点里所有直链换新 rkey, 返回新对象不改原来的; 正文文字不碰."""
+    if isinstance(obj, list):
+        return [refresh_tree(item, issued, now) for item in obj]
+    if isinstance(obj, dict):
+        return {key: (refresh(value, issued, now)
+                      if key in _URL_FIELDS and isinstance(value, str)
+                      else refresh_tree(value, issued, now))
+                for key, value in obj.items()}
+    return obj
+
+
 def cdn_url(appid: str, fileid: str) -> str:
     """自己传的文件 -> 不带 rkey 的直链(渲染时补). 图片带 spec=0, 页面换 spec 取中/小图."""
     url = f"{CDN_DOWNLOAD}?appid={appid}&fileid={fileid}"

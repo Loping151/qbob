@@ -51,7 +51,8 @@ from ..onebot.segments import emoji_of, normalize_message, with_file_ids
 from . import avatars, cards, cdnkeys, forwardpage, textimg
 from .repeat import RepeatGuard, fingerprint
 from .quota import BEIJING
-from .textimg import TEXT_IMAGE_MIN_CHARS, extract_links, looks_like_markdown
+from .textimg import (TEXT_IMAGE_MAX_SOURCE, TEXT_IMAGE_MIN_CHARS, extract_links,
+                      looks_like_markdown)
 from .uploader import MediaTooLarge
 
 if TYPE_CHECKING:
@@ -215,15 +216,17 @@ def strip_cmd_tags(text: str) -> str:
     return _CMD_TAG_RE.sub(replace, text)
 
 
-# 已有的 markdown 链接: 角标要补进它的显示文字里
-_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+# 已有的 markdown 链接: 角标要补进它的显示文字里. 显示文字不含方括号, 一串 [ 也是线性
+_MD_LINK_RE = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s)]+)\)")
 
 def prepare_image_text(body: str) -> tuple[str, list[str]]:
     """转图前的链接处理: 返回 (渲染用 md 源, 链接 URL 列表).
 
-    裸 URL 一律收成 [请点击 域名](url); 链接编角标 ⟦n⟧(渲染成 <sup>), 与单发的
-    链接消息里的 [n] 对应, 同一 URL 共用一个.
+    裸 URL 一律收成 [请点击 域名](url); 链接编角标 ⟦n⟧(排成上标), 与单发的
+    链接消息里的 [n] 对应, 同一 URL 共用一个. 在事件循环上跑, 先截到渲染上限
+    (多留一个字, 渲染端据此在图末注明截断).
     """
+    body = body[:TEXT_IMAGE_MAX_SOURCE + 1]
     links = extract_links(body)
     index = {url: i + 1 for i, url in enumerate(links)}
 
@@ -974,11 +977,7 @@ class Sender:
         """图片段 -> 字节: QQ 直链换新 rkey 再拉, 外链直接拉, base64/本地读出来."""
         raw = str(data.get("url") or data.get("file") or "")
         if raw.startswith(("http://", "https://")):
-            if cdnkeys.is_cdn(raw):
-                rkey = cdnkeys.fresh().get(cdnkeys.appid_of(raw))
-                if rkey:
-                    raw = cdnkeys.with_rkey(raw, rkey)
-            return await self._fetch_bytes(raw)
+            return await self._fetch_bytes(cdnkeys.refresh(raw))
         if not raw:
             return None
         blob, _ = await asyncio.to_thread(self.bot.media.load_bytes, raw)
